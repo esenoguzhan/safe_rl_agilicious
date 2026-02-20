@@ -1,18 +1,40 @@
 """
 Load PPO drone config YAML and optionally write flightlib vec_env / quadrotor_env
 configs to a run directory for use with flightmare_context.
+
+When the user overrides only *some* sections (e.g. quadrotor_env but not
+quadrotor_dynamics), we merge their overrides on top of the flightlib default
+config so the C++ side always sees a complete file.
 """
+import copy
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import yaml
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _SCRIPT_DIR.parent
+_FLIGHTLIB_DEFAULT_QUADROTOR_ENV = (
+    _REPO_ROOT / "flightmare" / "flightlib" / "configs" / "quadrotor_env.yaml"
+)
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load the main PPO drone config YAML."""
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
+
+
+def _deep_merge(base: Dict, override: Dict) -> Dict:
+    """Recursively merge *override* into a copy of *base*."""
+    merged = copy.deepcopy(base)
+    for k, v in override.items():
+        if k in merged and isinstance(merged[k], dict) and isinstance(v, dict):
+            merged[k] = _deep_merge(merged[k], v)
+        else:
+            merged[k] = copy.deepcopy(v)
+    return merged
 
 
 def _ensure_run_dir(run_dir: str) -> Path:
@@ -36,27 +58,45 @@ def _vec_env_yaml_from_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     env = cfg.get("env", {})
     vec = env.get("vec_env", {})
     merged = {**_VEC_ENV_DEFAULTS, **{k: vec[k] for k in vec if k in _VEC_ENV_DEFAULTS}}
-    # ensure render is bool for C++
     r = merged.get("render")
     if isinstance(r, str):
         merged["render"] = r.lower() in ("yes", "true", "1")
     return {"env": merged}
 
 
-def _quadrotor_env_yaml_from_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Build full quadrotor_env YAML dict from config env.quadrotor_env and env.quadrotor_dynamics."""
+def _load_flightlib_defaults() -> Dict[str, Any]:
+    """Load the default quadrotor_env.yaml shipped with flightlib."""
+    fpath = os.environ.get("FLIGHTMARE_PATH")
+    if fpath:
+        candidate = Path(fpath) / "flightlib" / "configs" / "quadrotor_env.yaml"
+        if candidate.is_file():
+            with open(candidate) as f:
+                return yaml.safe_load(f) or {}
+    if _FLIGHTLIB_DEFAULT_QUADROTOR_ENV.is_file():
+        with open(_FLIGHTLIB_DEFAULT_QUADROTOR_ENV) as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
+def _quadrotor_env_yaml_from_config(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Build a *complete* quadrotor_env YAML by merging user overrides on top of defaults."""
     env = cfg.get("env", {})
     qe = env.get("quadrotor_env")
     qd = env.get("quadrotor_dynamics")
     rl = env.get("rl")
-    out = {}
+    if not (qe or qd or rl):
+        return None
+
+    defaults = _load_flightlib_defaults()
+    override: Dict[str, Any] = {}
     if qe:
-        out["quadrotor_env"] = qe
+        override["quadrotor_env"] = qe
     if qd:
-        out["quadrotor_dynamics"] = qd
+        override["quadrotor_dynamics"] = qd
     if rl:
-        out["rl"] = rl
-    return out if out else None
+        override["rl"] = rl
+
+    return _deep_merge(defaults, override)
 
 
 def write_env_configs(cfg: Dict[str, Any], run_dir: str) -> str:

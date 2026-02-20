@@ -19,7 +19,7 @@ if _REPO_ROOT not in sys.path:
 from scripts.config_loader import load_config, prepare_env_run_dir, get_vec_env_config_string
 from scripts.context import flightmare_context
 from scripts.custom_reward_wrapper import CustomRewardWrapper
-from scripts.env_wrapper import FlightlibVecEnv
+from scripts.env_wrapper import FlightlibVecEnv, ActionHistoryWrapper
 
 
 def _ensure_flightgym_path():
@@ -68,6 +68,9 @@ def _get_QuadrotorEnv_v1():
         ) from None
 
 
+_MOTOR_INIT_MODES = {"zero": 0, "hover": 1}
+
+
 def _make_env(cfg):
     """Create FlightlibVecEnv, optionally inside flightmare_context."""
     QuadrotorEnv_v1 = _get_QuadrotorEnv_v1()
@@ -79,6 +82,10 @@ def _make_env(cfg):
     else:
         vec_config_str = get_vec_env_config_string(cfg)
         impl = QuadrotorEnv_v1(vec_config_str, False)
+
+    motor_init = cfg.get("env", {}).get("motor_init", "zero")
+    mode = _MOTOR_INIT_MODES.get(motor_init, 0)
+    impl.setMotorInitMode(mode)
 
     return FlightlibVecEnv(impl)
 
@@ -201,9 +208,16 @@ def main():
         np.random.seed(seed)
 
     env = _make_env(cfg_val)
-    custom_reward_cfg = cfg.get("env", {}).get("custom_reward")
+    env_cfg = cfg.get("env", {})
+    custom_reward_cfg = env_cfg.get("custom_reward")
     if custom_reward_cfg and custom_reward_cfg.get("enabled", False):
         env = CustomRewardWrapper(env, custom_reward_cfg)
+
+    action_history_len = env_cfg.get("action_history_len", 0)
+    state_obs_dim = env.observation_space.shape[0]
+    if action_history_len > 0:
+        env = ActionHistoryWrapper(env, action_history_len)
+
     training_cfg = cfg.get("training", {})
     normalize_obs = training_cfg.get("normalize_obs", True)
 
@@ -259,9 +273,13 @@ def main():
         if hasattr(env, "obs_rms") and env.obs_rms is not None:
             eps = getattr(env, "epsilon", 1e-8)
             std = np.sqrt(env.obs_rms.var + eps)
-            obs_list = [np.asarray(obs) * std + env.obs_rms.mean for obs in obs_list]
+            obs_list = [np.asarray(o) * std + env.obs_rms.mean for o in obs_list]
 
-        t_axis = np.arange(len(obs_list)) * 0.02
+        # Extract only state dimensions for plotting (drop action history if present)
+        obs_list = [np.asarray(o)[:state_obs_dim] for o in obs_list]
+
+        sim_dt = env_cfg.get("quadrotor_env", {}).get("sim_dt", 0.02)
+        t_axis = np.arange(len(obs_list)) * sim_dt
 
         save_path = os.path.join(plot_dir, f"episode_{ep}.png") if save_plots else None
         _plot_episode(obs_list, act_list, reward_list, t_axis, save_path=save_path, episode_idx=ep)

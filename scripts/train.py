@@ -23,7 +23,7 @@ if _REPO_ROOT not in sys.path:
 from scripts.config_loader import load_config, prepare_env_run_dir, get_vec_env_config_string
 from scripts.context import flightmare_context
 from scripts.custom_reward_wrapper import CustomRewardWrapper
-from scripts.env_wrapper import FlightlibVecEnv, VecMaxEpisodeSteps
+from scripts.env_wrapper import FlightlibVecEnv, VecMaxEpisodeSteps, DomainRandomizationWrapper, ActionHistoryWrapper
 from scripts.record_episode_statistics import VecRecordEpisodeStatistics
 
 MODELS_DIR = "models"
@@ -87,6 +87,28 @@ def _get_QuadrotorEnv_v1():
         ) from None
 
 
+_MOTOR_INIT_MODES = {"zero": 0, "hover": 1}
+
+
+def _resolve_resume_path(resume: str):
+    """Return (run_dir, model_zip) from a --resume argument.
+
+    Accepts either a directory (looks for best_model.zip inside) or a .zip path.
+    """
+    if os.path.isdir(resume):
+        run_dir = resume
+        for name in ("best_model.zip", "ppo_drone_final.zip"):
+            candidate = os.path.join(run_dir, name)
+            if os.path.isfile(candidate):
+                return run_dir, candidate
+        raise FileNotFoundError(
+            f"No best_model.zip or ppo_drone_final.zip found in {run_dir}"
+        )
+    if resume.endswith(".zip") and os.path.isfile(resume):
+        return os.path.dirname(resume), resume
+    raise FileNotFoundError(f"Cannot resolve --resume path: {resume}")
+
+
 def _make_env(cfg):
     """Create FlightlibVecEnv, optionally inside flightmare_context and with VecNormalize."""
     QuadrotorEnv_v1 = _get_QuadrotorEnv_v1()
@@ -99,6 +121,10 @@ def _make_env(cfg):
         vec_config_str = get_vec_env_config_string(cfg)
         impl = QuadrotorEnv_v1(vec_config_str, False)
 
+    motor_init = cfg.get("env", {}).get("motor_init", "zero")
+    mode = _MOTOR_INIT_MODES.get(motor_init, 0)
+    impl.setMotorInitMode(mode)
+
     env = FlightlibVecEnv(impl)
     return env
 
@@ -107,6 +133,11 @@ def main():
     parser = argparse.ArgumentParser(description="PPO training for drone control (flightlib + SB3)")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
     parser.add_argument("--seed", type=int, default=None, help="Random seed (overrides config)")
+    parser.add_argument(
+        "--resume", type=str, default=None,
+        help="Resume from a previous run directory or model .zip path. "
+             "Loads policy weights and VecNormalize stats from that run.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -125,21 +156,32 @@ def main():
 
     env = _make_env(cfg)
     env_cfg = cfg.get("env", {})
+
+    domain_rand_cfg = env_cfg.get("domain_randomization", {})
+    if domain_rand_cfg.get("enabled", False):
+        env = DomainRandomizationWrapper(env, domain_rand_cfg)
+        print("Domain randomization enabled:",
+              f"mass_range={domain_rand_cfg.get('mass_range')}, "
+              f"motor_tau_range={domain_rand_cfg.get('motor_tau_range')}")
+
     custom_reward_cfg = env_cfg.get("custom_reward")
     if custom_reward_cfg and custom_reward_cfg.get("enabled", False):
         env = CustomRewardWrapper(env, custom_reward_cfg)
     max_episode_steps = env_cfg.get("max_episode_steps")
     if max_episode_steps is not None:
         env = VecMaxEpisodeSteps(env, max_episode_steps)
+
+    action_history_len = env_cfg.get("action_history_len", 0)
+    if action_history_len > 0:
+        env = ActionHistoryWrapper(env, action_history_len)
+        print(f"Action history enabled: last {action_history_len} actions appended to obs "
+              f"(obs_dim: {env.observation_space.shape[0]})")
+
     training_cfg = cfg.get("training", {})
     normalize_obs = training_cfg.get("normalize_obs", True)
     normalize_reward = training_cfg.get("normalize_reward", False)
     record_deque_size = training_cfg.get("record_episode_statistics_deque_size", 100)
     env = VecRecordEpisodeStatistics(env, deque_size=record_deque_size)
-
-    if normalize_obs or normalize_reward:
-        from stable_baselines3.common.vec_env import VecNormalize
-        env = VecNormalize(env, norm_obs=normalize_obs, norm_reward=normalize_reward, clip_obs=10.0)
 
     ppo_cfg = cfg.get("ppo", {})
     policy_kwargs = ppo_cfg.get("policy_kwargs") or {"net_arch": [dict(pi=[128, 128], vf=[128, 128])]}
@@ -164,15 +206,42 @@ def main():
                 self.eval_env.obs_rms = train_env.obs_rms
             return True
 
-    model = PPO(
-        policy="MlpPolicy",
-        env=env,
-        verbose=1,
-        seed=seed,
-        tensorboard_log=run_dir,
-        policy_kwargs=policy_kwargs,
-        **ppo_kwargs,
-    )
+    # ------------------------------------------------------------------
+    # Resume from previous run or create fresh model
+    # ------------------------------------------------------------------
+    resume_path = args.resume
+    if resume_path:
+        resume_dir, model_zip = _resolve_resume_path(resume_path)
+        vecnorm_pkl = os.path.join(resume_dir, "vecnormalize.pkl")
+
+        if (normalize_obs or normalize_reward) and os.path.isfile(vecnorm_pkl):
+            from stable_baselines3.common.vec_env import VecNormalize
+            env = VecNormalize.load(vecnorm_pkl, env)
+            env.training = True
+            env.norm_reward = normalize_reward
+            print(f"Resumed VecNormalize stats from {vecnorm_pkl}")
+        elif normalize_obs or normalize_reward:
+            from stable_baselines3.common.vec_env import VecNormalize
+            env = VecNormalize(env, norm_obs=normalize_obs, norm_reward=normalize_reward, clip_obs=10.0)
+            print("Warning: --resume specified but no vecnormalize.pkl found; starting fresh normalization")
+
+        model = PPO.load(model_zip, env=env, seed=seed, tensorboard_log=run_dir,
+                         **ppo_kwargs)
+        print(f"Resumed model from {model_zip}")
+    else:
+        if normalize_obs or normalize_reward:
+            from stable_baselines3.common.vec_env import VecNormalize
+            env = VecNormalize(env, norm_obs=normalize_obs, norm_reward=normalize_reward, clip_obs=10.0)
+
+        model = PPO(
+            policy="MlpPolicy",
+            env=env,
+            verbose=1,
+            seed=seed,
+            tensorboard_log=run_dir,
+            policy_kwargs=policy_kwargs,
+            **ppo_kwargs,
+        )
 
     save_interval = training_cfg.get("save_interval", 50_000)
     eval_freq = training_cfg.get("eval_freq", 10_000)
@@ -189,6 +258,8 @@ def main():
         eval_env = CustomRewardWrapper(eval_env, custom_reward_cfg)
     if max_episode_steps is not None:
         eval_env = VecMaxEpisodeSteps(eval_env, max_episode_steps)
+    if action_history_len > 0:
+        eval_env = ActionHistoryWrapper(eval_env, action_history_len)
     if normalize_obs or normalize_reward:
         from stable_baselines3.common.vec_env import VecNormalize
         eval_env = VecNormalize(eval_env, norm_obs=normalize_obs, norm_reward=False, clip_obs=10.0)

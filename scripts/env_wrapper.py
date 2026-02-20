@@ -196,3 +196,170 @@ class VecMaxEpisodeSteps:
 
     def __getattr__(self, name):
         return getattr(self.venv, name)
+
+
+class DomainRandomizationWrapper:
+    """
+    VecEnv wrapper that randomizes mass and motor_tau per-env at each episode reset.
+    Requires the underlying FlightlibVecEnv._impl to expose setEnvMasses / setEnvMotorTauInvs.
+    """
+
+    def __init__(self, venv, domain_rand_cfg):
+        self.venv = venv
+        self._num_envs = venv.num_envs
+        self._impl = venv._impl
+
+        self._mass_range = domain_rand_cfg.get("mass_range")
+        self._motor_tau_range = domain_rand_cfg.get("motor_tau_range")
+
+        self._current_masses = np.zeros(self._num_envs, dtype=np.float32)
+        self._current_tau_invs = np.zeros(self._num_envs, dtype=np.float32)
+
+    @property
+    def num_envs(self):
+        return self._num_envs
+
+    @property
+    def observation_space(self):
+        return self.venv.observation_space
+
+    @property
+    def action_space(self):
+        return self.venv.action_space
+
+    def _randomize_envs(self, env_ids=None):
+        if env_ids is None:
+            env_ids = np.arange(self._num_envs)
+        if len(env_ids) == 0:
+            return
+
+        if self._mass_range is not None:
+            lo, hi = self._mass_range
+            new_masses = np.random.uniform(lo, hi, size=len(env_ids)).astype(np.float32)
+            self._current_masses[env_ids] = new_masses
+            self._impl.setEnvMasses(self._current_masses)
+
+        if self._motor_tau_range is not None:
+            lo, hi = self._motor_tau_range
+            new_taus = np.random.uniform(lo, hi, size=len(env_ids))
+            new_tau_invs = (1.0 / new_taus).astype(np.float32)
+            self._current_tau_invs[env_ids] = new_tau_invs
+            self._impl.setEnvMotorTauInvs(self._current_tau_invs)
+
+    def reset(self, **kwargs):
+        self._randomize_envs()
+        return self.venv.reset(**kwargs)
+
+    def step_async(self, actions):
+        self.venv.step_async(actions)
+
+    def step_wait(self):
+        obs, rewards, dones, infos = self.venv.step_wait()
+        done_ids = np.where(dones)[0]
+        if len(done_ids) > 0:
+            self._randomize_envs(done_ids)
+        return obs, rewards, dones, infos
+
+    def step(self, actions):
+        self.step_async(actions)
+        return self.step_wait()
+
+    def close(self):
+        self.venv.close()
+
+    def env_is_wrapped(self, wrapper_class, indices=None):
+        if hasattr(self.venv, "env_is_wrapped"):
+            return self.venv.env_is_wrapped(wrapper_class, indices=indices)
+        return (False,) * self._num_envs
+
+    def __getattr__(self, name):
+        return getattr(self.venv, name)
+
+
+class ActionHistoryWrapper:
+    """
+    VecEnv wrapper that augments observations with the last N actions.
+    Observation becomes [obs, a_{t-N}, a_{t-N+1}, ..., a_{t-1}].
+    On episode reset the action history is zeroed out.
+    """
+
+    def __init__(self, venv, n_actions):
+        self.venv = venv
+        self._n_actions = int(n_actions)
+        self._num_envs = venv.num_envs
+
+        self._inner_obs_dim = venv.observation_space.shape[0]
+        self._act_dim = venv.action_space.shape[0]
+        aug_dim = self._inner_obs_dim + self._n_actions * self._act_dim
+
+        self._observation_space = gym.spaces.Box(
+            low=np.full(aug_dim, -np.inf, dtype=np.float32),
+            high=np.full(aug_dim, np.inf, dtype=np.float32),
+            shape=(aug_dim,),
+            dtype=np.float32,
+        )
+        self._action_space = venv.action_space
+
+        self._act_buffer = np.zeros(
+            (self._num_envs, self._n_actions, self._act_dim), dtype=np.float32
+        )
+
+    @property
+    def num_envs(self):
+        return self._num_envs
+
+    @property
+    def observation_space(self):
+        return self._observation_space
+
+    @property
+    def action_space(self):
+        return self._action_space
+
+    @property
+    def inner_obs_dim(self):
+        return self._inner_obs_dim
+
+    def _augment_obs(self, obs):
+        flat_hist = self._act_buffer.reshape(self._num_envs, -1)
+        return np.concatenate([obs, flat_hist], axis=1).astype(np.float32)
+
+    def reset(self, **kwargs):
+        self._act_buffer.fill(0.0)
+        obs = self.venv.reset(**kwargs)
+        return self._augment_obs(obs)
+
+    def step_async(self, actions):
+        self._act_buffer = np.roll(self._act_buffer, -1, axis=1)
+        self._act_buffer[:, -1, :] = actions
+        self.venv.step_async(actions)
+
+    def _augment_single(self, obs_1d, env_id):
+        flat_hist = self._act_buffer[env_id].reshape(-1)
+        return np.concatenate([obs_1d, flat_hist]).astype(np.float32)
+
+    def step_wait(self):
+        obs, rewards, dones, infos = self.venv.step_wait()
+        for i in range(self._num_envs):
+            if dones[i]:
+                if "terminal_observation" in infos[i]:
+                    infos[i]["terminal_observation"] = self._augment_single(
+                        infos[i]["terminal_observation"], i
+                    )
+                self._act_buffer[i].fill(0.0)
+        return self._augment_obs(obs), rewards, dones, infos
+
+    def step(self, actions):
+        self.step_async(actions)
+        return self.step_wait()
+
+    def close(self):
+        self.venv.close()
+
+    def env_is_wrapped(self, wrapper_class, indices=None):
+        if hasattr(self.venv, "env_is_wrapped"):
+            return self.venv.env_is_wrapped(wrapper_class, indices=indices)
+        return (False,) * self._num_envs
+
+    def __getattr__(self, name):
+        return getattr(self.venv, name)
