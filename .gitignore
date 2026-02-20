@@ -1,0 +1,51 @@
+# Editor / IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.sublime-*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.eggs/
+*.egg-info/
+*.egg
+.venv/
+venv/
+env/
+.env
+*.log
+
+# Build (CMake, C++)
+flightmare/flightlib/build/
+build/
+cmake-build-*/
+*.o
+*.a
+*.out
+
+# Training / ML artifacts
+logs/
+models/
+checkpoints/
+wandb/
+runs/
+*.pt
+*.pth
+*.ckpt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Optional: uncomment if you don't want papers in the repo
+*.pdf
