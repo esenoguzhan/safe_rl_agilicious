@@ -1,0 +1,88 @@
+# Curriculum Phase 3: Domain randomization for sim-to-real robustness
+#
+# Resume from Phase 2, enable domain randomization around the real parameters.
+# Also enable action history so the policy can infer latent dynamics.
+#
+# Usage:
+#   python scripts/train.py --config configs/curriculum/phase3_domain_rand.yaml \
+#       --resume models/PPO_3000000_X/   # <-- Phase 2 best model directory
+#
+# NOTE: action_history_len changes the observation dimension, so the Phase 2
+# checkpoint network cannot be reused directly.  Two options:
+#   a) Set action_history_len: 0 here and add it in a separate Phase 4.
+#   b) Include action_history_len > 0 from Phase 1 onward (adds zeros initially).
+# This config uses option (a) — no action history.  See phase4 for adding it.
+
+env:
+  max_episode_steps: 1000
+  vec_env:
+    seed: 1
+    scene_id: 0
+    num_envs: 4
+    num_threads: 2
+    render: false
+
+  quadrotor_dynamics:
+    mass: 0.774
+    arm_l: 0.125
+    motor_omega_min: 150.0
+    motor_omega_max: 2800.0
+    motor_tau: 0.033
+    thrust_map: [1.562522e-6, 0.0, 0.0]
+    kappa: 0.022
+    omega_max: [10.0, 10.0, 4.0]
+
+  motor_init: hover
+
+  domain_randomization:
+    enabled: true
+    mass_range: [0.65, 0.90]
+    motor_tau_range: [0.02, 0.05]
+
+  action_history_len: 5
+
+  custom_reward:
+    enabled: true
+    x_goal: [0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    act_goal: [0.0, 0.0, 0.0, 0.0]
+    rew_state_weight: [1.0, 1.0, 1.5, 0.2, 0.2, 0.2, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+    rew_act_weight: [0.001, 0.001, 0.001, 0.001]
+    rew_exponential: true
+
+ppo:
+  learning_rate: 3.0e-4
+  n_steps: 1024
+  batch_size: 256
+  n_epochs: 8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.001
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  policy_kwargs:
+    net_arch:
+      pi: [256, 256]
+      vf: [256, 256]
+
+training:
+  total_timesteps: 5000000
+  log_interval: 1
+  save_interval: 100000
+  eval_freq: 100000
+  seed: 0
+  normalize_obs: true
+  normalize_reward: true
+  record_episode_statistics_deque_size: 100
+
+evaluation:
+  n_episodes: 5
+  max_episode_steps: 1000
+  render: false
+  deterministic: true
+
+paths:
+  log_dir: logs
+  save_dir: saved
+  checkpoint_path: saved/ppo_drone_final.zip
+  plot_dir: val_plots

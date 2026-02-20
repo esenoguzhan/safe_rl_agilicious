@@ -1,12 +1,15 @@
 # PPO drone control — single config for training and validation
 # Usage: train.py --config configs/drone_ppo_default.yaml
 #        val.py --config configs/drone_ppo_default.yaml --checkpoint saved/ppo_drone_final.zip
+#
+# This is the "base" config with default (easy) dynamics.
+# For curriculum learning see phase configs under configs/curriculum/.
 
 # -----------------------------------------------------------------------------
 # env: flightlib vectorized env and optional quadrotor_env overrides
 # -----------------------------------------------------------------------------
 env:
-  max_episode_steps: 1000   # cap steps per episode (10s at sim_dt=0.02); keeps ~2 full episodes per rollout with n_steps=1024
+  max_episode_steps: 1000   # 20s at sim_dt=0.02
   vec_env:
     seed: 1
     scene_id: 0   # 0 warehouse, 1 garage, 3 natureforest
@@ -14,31 +17,40 @@ env:
     num_threads: 2
     render: false
 
-  # Optional: override flightlib quadrotor_env.yaml (sim_dt, max_t, dynamics, rl)
-  # If omitted, flightlib uses its default config under FLIGHTMARE_PATH
+  # Override flightlib quadrotor_env.yaml (sim_dt, max_t, dynamics, rl).
+  # Sections here are deep-merged on top of the flightlib defaults,
+  # so missing sections (e.g. rl) are filled from the default config.
   quadrotor_env:
     sim_dt: 0.02
     max_t: 20.0
   quadrotor_dynamics:
     mass: 0.774
-    arm_l: 0.125   # sqrt(0.075^2 + 0.10^2) from tbm positions
+    arm_l: 0.125
     motor_omega_min: 150.0
     motor_omega_max: 2800.0
     motor_tau: 0.033
     thrust_map: [1.562522e-6, 0.0, 0.0]
     kappa: 0.022
     omega_max: [10.0, 10.0, 4.0]
-  # rl:
-  #   pos_coeff: -0.002
-  #   ori_coeff: -0.002
-  #   lin_vel_coeff: -0.0002
-  #   ang_vel_coeff: -0.0002
-  #   act_coeff: -0.0002
 
-  # Custom reward (overwrites C++ reward when enabled): rew = -dist, dist = state_weight@(obs-x_goal)^2 + act_weight@(act-act_goal)^2
+  # Motor initialization at episode start: "zero" (motors stopped) or "hover" (motors at hover speed).
+  motor_init: hover
+
+  # Domain randomization: randomize dynamics per-env each episode during training.
+  # During evaluation, fixed values from quadrotor_dynamics are used (no randomization).
+  domain_randomization:
+    enabled: false
+    mass_range: [0.6, 0.9]           # uniform [min, max] in kg
+    motor_tau_range: [0.015, 0.045]    # uniform [min, max] in seconds
+
+  # Action history: append last N actions to observation vector.
+  # Set to 0 to disable.
+  action_history_len: 5
+
+  # Custom reward: rew = -dist = state_weight@(obs-x_goal)^2 + act_weight@(act-act_goal)^2
   custom_reward:
     enabled: true
-    x_goal: [0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # pos(3), ori(3), lin_vel(3), ang_vel(3)
+    x_goal: [0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     act_goal: [0.0, 0.0, 0.0, 0.0]
     rew_state_weight: [1.0, 1.0, 1.5, 0.2, 0.2, 0.2, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
     rew_act_weight: [0.001, 0.001, 0.001, 0.001]
@@ -67,31 +79,29 @@ ppo:
 # training: total steps, logging, saving, observation normalization
 # -----------------------------------------------------------------------------
 training:
-  total_timesteps: 10000000
+  total_timesteps: 5000000
   log_interval: 1
   save_interval: 100000
   eval_freq: 100000
   seed: 0
-  normalize_obs: true   # VecNormalize (recommended for mixed-scale obs)
-  normalize_reward: true   # VecNormalize reward normalization (stabilises value function training)
-  record_episode_statistics_deque_size: 100   # deque size for VecRecordEpisodeStatistics (returns/lengths)
+  normalize_obs: true
+  normalize_reward: true
+  record_episode_statistics_deque_size: 100
 
 # -----------------------------------------------------------------------------
 # evaluation: used by val.py
 # -----------------------------------------------------------------------------
 evaluation:
   n_episodes: 5
-  max_episode_steps: 1000   # used by val.py; matches training horizon for consistent evaluation
+  max_episode_steps: 1000
   render: false
   deterministic: true
 
 # -----------------------------------------------------------------------------
-# paths: train.py creates models/PPO_<steps> (e.g. PPO_2000000; or PPO_2000000_2 if exists) and overrides
-#        log_dir/save_dir to that run folder (best model, checkpoints, TB, config).
-#        val.py saves eval results (plots + eval_results.txt) in the checkpoint's folder.
+# paths
 # -----------------------------------------------------------------------------
 paths:
   log_dir: logs
   save_dir: saved
-  checkpoint_path: saved/ppo_drone_final.zip   # e.g. models/PPO_steps/best_model.zip
+  checkpoint_path: saved/ppo_drone_final.zip
   plot_dir: val_plots
