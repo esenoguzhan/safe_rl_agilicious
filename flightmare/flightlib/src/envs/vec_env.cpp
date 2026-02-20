@@ -198,6 +198,33 @@ void VecEnv<EnvBase>::disconnectUnity(void) {
 }
 
 template<typename EnvBase>
+bool VecEnv<EnvBase>::setEnvMasses(Ref<Vector<>> masses) {
+  if (masses.size() != num_envs_) return false;
+  bool ok = true;
+  for (int i = 0; i < num_envs_; i++) {
+    if (!envs_[i]->setMass(masses(i))) ok = false;
+  }
+  return ok;
+}
+
+template<typename EnvBase>
+bool VecEnv<EnvBase>::setEnvMotorTauInvs(Ref<Vector<>> tau_invs) {
+  if (tau_invs.size() != num_envs_) return false;
+  bool ok = true;
+  for (int i = 0; i < num_envs_; i++) {
+    if (!envs_[i]->setMotorTauInv(tau_invs(i))) ok = false;
+  }
+  return ok;
+}
+
+template<typename EnvBase>
+void VecEnv<EnvBase>::setMotorInitMode(int mode) {
+  for (int i = 0; i < num_envs_; i++) {
+    envs_[i]->setMotorInitMode(mode);
+  }
+}
+
+template<typename EnvBase>
 void VecEnv<EnvBase>::curriculumUpdate(void) {
   for (int i = 0; i < num_envs_; i++) envs_[i]->curriculumUpdate();
 }

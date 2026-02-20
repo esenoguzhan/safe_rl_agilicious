@@ -53,6 +53,9 @@ class QuadrotorEnv final : public EnvBase {
 
   // - public set functions
   bool loadParam(const YAML::Node &cfg);
+  bool setMass(Scalar mass);
+  bool setMotorTauInv(Scalar tau_inv);
+  void setMotorInitMode(int mode);
 
   // - public get functions
   bool getObs(Ref<Vector<>> obs) override;
@@ -88,6 +91,8 @@ class QuadrotorEnv final : public EnvBase {
   Vector<quadenv::kNAct> act_std_;
   Vector<quadenv::kNObs> obs_mean_ = Vector<quadenv::kNObs>::Zero();
   Vector<quadenv::kNObs> obs_std_ = Vector<quadenv::kNObs>::Ones();
+
+  int motor_init_mode_{0};  // 0=zero, 1=hover
 
   YAML::Node cfg_;
   Matrix<3, 2> world_box_;

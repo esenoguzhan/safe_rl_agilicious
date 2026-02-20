@@ -75,6 +75,17 @@ bool QuadrotorEnv::reset(Ref<Vector<>> obs, const bool random) {
   cmd_.t = 0.0;
   cmd_.thrusts.setZero();
 
+  if (motor_init_mode_ == 1) {
+    // hover: set motor omega to steady-state hover speed
+    Scalar hover_thrust = quadrotor_ptr_->getMass() * (-Gz) / 4.0;
+    Vector<4> hover_thrusts = Vector<4>::Ones() * hover_thrust;
+    QuadrotorDynamics dyn;
+    quadrotor_ptr_->getDynamics(&dyn);
+    Vector<4> hover_omega = dyn.motorThrustToOmega(hover_thrusts);
+    quadrotor_ptr_->setMotorOmega(hover_omega);
+    cmd_.thrusts = hover_thrusts;
+  }
+
   // obtain observations
   getObs(obs);
   return true;
@@ -167,6 +178,27 @@ bool QuadrotorEnv::loadParam(const YAML::Node &cfg) {
     return false;
   }
   return true;
+}
+
+void QuadrotorEnv::setMotorInitMode(int mode) {
+  motor_init_mode_ = mode;
+}
+
+bool QuadrotorEnv::setMass(Scalar mass) {
+  QuadrotorDynamics dyn;
+  quadrotor_ptr_->getDynamics(&dyn);
+  if (!dyn.setMass(mass)) return false;
+  if (!quadrotor_ptr_->updateDynamics(dyn)) return false;
+  act_mean_ = Vector<quadenv::kNAct>::Ones() * (-mass * Gz) / 4;
+  act_std_ = Vector<quadenv::kNAct>::Ones() * (-mass * 2 * Gz) / 4;
+  return true;
+}
+
+bool QuadrotorEnv::setMotorTauInv(Scalar tau_inv) {
+  QuadrotorDynamics dyn;
+  quadrotor_ptr_->getDynamics(&dyn);
+  if (!dyn.setMotortauInv(tau_inv)) return false;
+  return quadrotor_ptr_->updateDynamics(dyn);
 }
 
 bool QuadrotorEnv::getAct(Ref<Vector<>> act) const {

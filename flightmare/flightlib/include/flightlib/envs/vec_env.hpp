@@ -55,6 +55,11 @@ class VecEnv {
   bool connectUnity();
   void disconnectUnity();
 
+  // per-env dynamics parameter setters (for domain randomization)
+  bool setEnvMasses(Ref<Vector<>> masses);
+  bool setEnvMotorTauInvs(Ref<Vector<>> tau_invs);
+  void setMotorInitMode(int mode);
+
   // public functions
   inline int getSeed(void) { return seed_; };
   inline SceneID getSceneID(void) { return scene_id_; };

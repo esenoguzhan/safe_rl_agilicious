@@ -61,6 +61,7 @@ class Quadrotor : ObjectBase {
   bool constrainInWorldBox(const QuadState& old_state);
 
   //
+  void setMotorOmega(const Vector<4>& omega);
   inline Scalar getMass(void) { return dynamics_.getMass(); };
   inline void setSize(const Ref<Vector<3>> size) { size_ = size; };
   inline void setCollision(const bool collision) { collision_ = collision; };
