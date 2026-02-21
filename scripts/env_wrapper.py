@@ -200,8 +200,10 @@ class VecMaxEpisodeSteps:
 
 class DomainRandomizationWrapper:
     """
-    VecEnv wrapper that randomizes mass and motor_tau per-env at each episode reset.
-    Requires the underlying FlightlibVecEnv._impl to expose setEnvMasses / setEnvMotorTauInvs.
+    VecEnv wrapper that randomizes mass, motor_tau, and goal position
+    per-env at each episode reset.
+    Requires the underlying FlightlibVecEnv._impl to expose
+    setEnvMasses / setEnvMotorTauInvs / setEnvGoalPositions.
     """
 
     def __init__(self, venv, domain_rand_cfg):
@@ -209,11 +211,13 @@ class DomainRandomizationWrapper:
         self._num_envs = venv.num_envs
         self._impl = venv._impl
 
-        self._mass_range = domain_rand_cfg.get("mass_range")
-        self._motor_tau_range = domain_rand_cfg.get("motor_tau_range")
+        self._mass_range = domain_rand_cfg.get("mass_range") if domain_rand_cfg.get("randomize_mass", False) else None
+        self._motor_tau_range = domain_rand_cfg.get("motor_tau_range") if domain_rand_cfg.get("randomize_motor_tau", False) else None
+        self._goal_pos_range = domain_rand_cfg.get("goal_pos_range") if domain_rand_cfg.get("randomize_goal", False) else None
 
         self._current_masses = np.zeros(self._num_envs, dtype=np.float32)
         self._current_tau_invs = np.zeros(self._num_envs, dtype=np.float32)
+        self._current_goals = np.zeros((self._num_envs, 3), dtype=np.float32)
 
     @property
     def num_envs(self):
@@ -245,6 +249,16 @@ class DomainRandomizationWrapper:
             new_tau_invs = (1.0 / new_taus).astype(np.float32)
             self._current_tau_invs[env_ids] = new_tau_invs
             self._impl.setEnvMotorTauInvs(self._current_tau_invs)
+
+        if self._goal_pos_range is not None:
+            x_range = self._goal_pos_range.get("x", [0.0, 0.0])
+            y_range = self._goal_pos_range.get("y", [0.0, 0.0])
+            z_range = self._goal_pos_range.get("z", [3.0, 7.0])
+            for i in env_ids:
+                self._current_goals[i, 0] = np.random.uniform(x_range[0], x_range[1])
+                self._current_goals[i, 1] = np.random.uniform(y_range[0], y_range[1])
+                self._current_goals[i, 2] = np.random.uniform(z_range[0], z_range[1])
+            self._impl.setEnvGoalPositions(self._current_goals)
 
     def reset(self, **kwargs):
         self._randomize_envs()

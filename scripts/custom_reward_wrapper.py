@@ -6,8 +6,8 @@ All parameters from YAML env.custom_reward.
 """
 import numpy as np
 
-# Default goal (matches flightlib quadrotor_env: pos 0,0,5; zero ori, vel, ang_vel)
-DEFAULT_X_GOAL = [0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+# Default goal: pos_error(3)=0 + quat_identity(4) + zero_vel(3) + zero_omega(3) = 13
+DEFAULT_X_GOAL = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 DEFAULT_ACT_GOAL = [0.0, 0.0, 0.0, 0.0]
 
 
@@ -40,7 +40,7 @@ class CustomRewardWrapper:
         if hasattr(obs_dim, "shape"):
             obs_dim = obs_dim.shape[0]
         else:
-            obs_dim = 12
+            obs_dim = 13
         act_dim = getattr(venv, "action_space", None)
         if hasattr(act_dim, "shape"):
             act_dim = act_dim.shape[0]
@@ -50,12 +50,14 @@ class CustomRewardWrapper:
         self._act_goal = _parse_list(cfg, "act_goal", DEFAULT_ACT_GOAL, act_dim)
         self._rew_state_weight = _parse_list(
             cfg, "rew_state_weight",
-            [0.1] * 3 + [0.2] * 3 + [0.01] * 6,  # pos, ori, lin_vel, ang_vel
+            [0.1] * 3 + [0.2] * 4 + [0.01] * 6,
             obs_dim,
         )
         self._rew_act_weight = _parse_list(cfg, "rew_act_weight", [0.001] * act_dim, act_dim)
+        self._rew_act_rate_weight = _parse_list(cfg, "rew_act_rate_weight", [0.0] * act_dim, act_dim)
         self._rew_exponential = cfg.get("rew_exponential", False)
         self._pending_actions = None
+        self._prev_actions = None
 
     @property
     def num_envs(self):
@@ -75,6 +77,9 @@ class CustomRewardWrapper:
         dist = np.sum(self._rew_state_weight * state_error * state_error, axis=1) + np.sum(
             self._rew_act_weight * act_error * act_error, axis=1
         )
+        if self._prev_actions is not None:
+            act_delta = actions - self._prev_actions
+            dist += np.sum(self._rew_act_rate_weight * act_delta * act_delta, axis=1)
         rew = -dist
         if self._rew_exponential:
             rew = np.exp(rew)
@@ -82,6 +87,7 @@ class CustomRewardWrapper:
 
     def reset(self, **kwargs):
         self._pending_actions = None
+        self._prev_actions = None
         out = self.venv.reset(**kwargs)
         return out[0] if isinstance(out, tuple) else out
 
@@ -94,6 +100,12 @@ class CustomRewardWrapper:
         obs, rewards, dones, infos = self.venv.step_wait()
         if self.enabled and self._pending_actions is not None:
             rewards = self._compute_reward(obs, self._pending_actions)
+            prev = self._pending_actions.copy()
+            if np.any(dones):
+                for i in range(len(dones)):
+                    if dones[i]:
+                        prev[i] = 0.0
+            self._prev_actions = prev
             self._pending_actions = None
         return obs, rewards, dones, infos
 

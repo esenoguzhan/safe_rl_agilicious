@@ -87,11 +87,28 @@ def _make_env(cfg):
     mode = _MOTOR_INIT_MODES.get(motor_init, 0)
     impl.setMotorInitMode(mode)
 
+    goal_pos = cfg.get("env", {}).get("goal_position")
+    if goal_pos is not None:
+        goals = np.array([[goal_pos[0], goal_pos[1], goal_pos[2]]] * impl.getNumOfEnvs(),
+                         dtype=np.float32)
+        impl.setEnvGoalPositions(goals)
+
     return FlightlibVecEnv(impl)
 
 
-def _plot_episode(obs_list, act_list, reward_list, t_axis, save_path=None, episode_idx=0):
-    """Plot position, orientation, velocities, rewards, actions vs time for one episode."""
+def _quat_to_tilt_deg(qw, qx, qy, qz):
+    """Compute tilt angle (angle between body-z and world-z) from quaternion."""
+    body_z_world = 1.0 - 2.0 * (qx**2 + qy**2)
+    body_z_world = np.clip(body_z_world, -1.0, 1.0)
+    return np.degrees(np.arccos(body_z_world))
+
+
+def _plot_episode(obs_list, act_list, reward_list, t_axis, save_path=None, episode_idx=0,
+                  goal_pos=None):
+    """Plot position error, orientation, velocities, rewards, actions vs time.
+
+    Obs layout: [pos_error(3), quat(4), lin_vel(3), ang_vel(3)] = 13 dims.
+    """
     import matplotlib.pyplot as plt
 
     obs = np.array(obs_list)
@@ -100,41 +117,49 @@ def _plot_episode(obs_list, act_list, reward_list, t_axis, save_path=None, episo
 
     n_rows = 4
     n_cols = 2
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 12))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 14))
     fig.suptitle(f"Episode {episode_idx} — state and action traces")
 
-    # Position (0:3)
+    # Position error (0:3) — error = goal - current, so 0 means at goal
     ax = axes[0, 0]
-    ax.plot(t_axis, obs[:, 0], label="x")
-    ax.plot(t_axis, obs[:, 1], label="y")
-    ax.plot(t_axis, obs[:, 2], label="z")
-    ax.set_ylabel("Position (m)")
+    ax.plot(t_axis, obs[:, 0], label="err_x")
+    ax.plot(t_axis, obs[:, 1], label="err_y")
+    ax.plot(t_axis, obs[:, 2], label="err_z")
+    ax.axhline(0, color="k", linewidth=0.5, linestyle="--")
+    goal_str = f" (goal={goal_pos})" if goal_pos is not None else ""
+    ax.set_ylabel(f"Position error (m){goal_str}")
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    # Orientation euler (3:6)
+    # Quaternion (3:7) + tilt angle
     ax = axes[0, 1]
-    ax.plot(t_axis, obs[:, 3], label="roll")
-    ax.plot(t_axis, obs[:, 4], label="pitch")
-    ax.plot(t_axis, obs[:, 5], label="yaw")
-    ax.set_ylabel("Orientation (rad)")
+    ax.plot(t_axis, obs[:, 3], label="qw")
+    ax.plot(t_axis, obs[:, 4], label="qx")
+    ax.plot(t_axis, obs[:, 5], label="qy")
+    ax.plot(t_axis, obs[:, 6], label="qz")
+    ax.set_ylabel("Quaternion")
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(True, alpha=0.3)
+    ax2 = ax.twinx()
+    tilt = _quat_to_tilt_deg(obs[:, 3], obs[:, 4], obs[:, 5], obs[:, 6])
+    ax2.plot(t_axis, tilt, label="tilt", color="k", linewidth=1.5, alpha=0.5)
+    ax2.set_ylabel("Tilt (deg)", color="k")
+    ax2.legend(loc="lower right", fontsize=8)
 
-    # Linear velocity (6:9)
+    # Linear velocity (7:10)
     ax = axes[1, 0]
-    ax.plot(t_axis, obs[:, 6], label="vx")
-    ax.plot(t_axis, obs[:, 7], label="vy")
-    ax.plot(t_axis, obs[:, 8], label="vz")
+    ax.plot(t_axis, obs[:, 7], label="vx")
+    ax.plot(t_axis, obs[:, 8], label="vy")
+    ax.plot(t_axis, obs[:, 9], label="vz")
     ax.set_ylabel("Linear vel (m/s)")
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    # Angular velocity (9:12)
+    # Angular velocity (10:13)
     ax = axes[1, 1]
-    ax.plot(t_axis, obs[:, 9], label="wx")
-    ax.plot(t_axis, obs[:, 10], label="wy")
-    ax.plot(t_axis, obs[:, 11], label="wz")
+    ax.plot(t_axis, obs[:, 10], label="wx")
+    ax.plot(t_axis, obs[:, 11], label="wy")
+    ax.plot(t_axis, obs[:, 12], label="wz")
     ax.set_ylabel("Angular vel (rad/s)")
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(True, alpha=0.3)
@@ -184,6 +209,8 @@ def main():
     parser.add_argument("--episodes", type=int, default=None, help="Override evaluation.n_episodes")
     parser.add_argument("--save_plots", action="store_true", help="Save figures to disk")
     parser.add_argument("--plot_dir", type=str, default=None, help="Directory to save plots")
+    parser.add_argument("--goal", type=float, nargs=3, default=None, metavar=("X", "Y", "Z"),
+                        help="Override goal position [x y z] (default: from config)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -203,6 +230,9 @@ def main():
     # Flightlib only sets done on ground contact; cap steps so episodes always end (e.g. max_t=5s @ 0.02 => 250)
     max_episode_steps = eval_cfg.get("max_episode_steps", 250)
     seed = args.seed if args.seed is not None else cfg.get("training", {}).get("seed", 0)
+
+    if args.goal is not None:
+        cfg_val["env"]["goal_position"] = list(args.goal)
 
     if seed is not None:
         np.random.seed(seed)
@@ -281,8 +311,10 @@ def main():
         sim_dt = env_cfg.get("quadrotor_env", {}).get("sim_dt", 0.02)
         t_axis = np.arange(len(obs_list)) * sim_dt
 
+        goal_pos = cfg_val.get("env", {}).get("goal_position", [0.0, 0.0, 5.0])
         save_path = os.path.join(plot_dir, f"episode_{ep}.png") if save_plots else None
-        _plot_episode(obs_list, act_list, reward_list, t_axis, save_path=save_path, episode_idx=ep)
+        _plot_episode(obs_list, act_list, reward_list, t_axis, save_path=save_path,
+                      episode_idx=ep, goal_pos=goal_pos)
 
     env.close()
 

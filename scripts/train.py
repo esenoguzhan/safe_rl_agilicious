@@ -125,6 +125,12 @@ def _make_env(cfg):
     mode = _MOTOR_INIT_MODES.get(motor_init, 0)
     impl.setMotorInitMode(mode)
 
+    goal_pos = cfg.get("env", {}).get("goal_position")
+    if goal_pos is not None:
+        goals = np.array([[goal_pos[0], goal_pos[1], goal_pos[2]]] * impl.getNumOfEnvs(),
+                         dtype=np.float32)
+        impl.setEnvGoalPositions(goals)
+
     env = FlightlibVecEnv(impl)
     return env
 
@@ -160,9 +166,14 @@ def main():
     domain_rand_cfg = env_cfg.get("domain_randomization", {})
     if domain_rand_cfg.get("enabled", False):
         env = DomainRandomizationWrapper(env, domain_rand_cfg)
-        print("Domain randomization enabled:",
-              f"mass_range={domain_rand_cfg.get('mass_range')}, "
-              f"motor_tau_range={domain_rand_cfg.get('motor_tau_range')}")
+        active = []
+        if domain_rand_cfg.get("randomize_mass", False):
+            active.append(f"mass={domain_rand_cfg.get('mass_range')}")
+        if domain_rand_cfg.get("randomize_motor_tau", False):
+            active.append(f"motor_tau={domain_rand_cfg.get('motor_tau_range')}")
+        if domain_rand_cfg.get("randomize_goal", False):
+            active.append(f"goal_pos={domain_rand_cfg.get('goal_pos_range')}")
+        print(f"Domain randomization enabled: {', '.join(active) or 'none'}")
 
     custom_reward_cfg = env_cfg.get("custom_reward")
     if custom_reward_cfg and custom_reward_cfg.get("enabled", False):
