@@ -13,8 +13,10 @@ QuadrotorEnv::QuadrotorEnv(const std::string &cfg_path)
     lin_vel_coeff_(0.0),
     ang_vel_coeff_(0.0),
     act_coeff_(0.0),
-    goal_state_((Vector<quadenv::kNObs>() << 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0,
-                 0.0, 0.0, 0.0, 0.0, 0.0)
+    goal_state_((Vector<quadenv::kNObs>() << 0.0, 0.0, 0.0,
+                 1.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0)
                   .finished()) {
   // load configuration file
   YAML::Node cfg_ = YAML::LoadFile(cfg_path);
@@ -94,10 +96,15 @@ bool QuadrotorEnv::reset(Ref<Vector<>> obs, const bool random) {
 bool QuadrotorEnv::getObs(Ref<Vector<>> obs) {
   quadrotor_ptr_->getState(&quad_state_);
 
-  // convert quaternion to euler angle
-  Vector<3> euler_zyx = quad_state_.q().toRotationMatrix().eulerAngles(2, 1, 0);
-  // quaternionToEuler(quad_state_.q(), euler);
-  quad_obs_ << quad_state_.p, euler_zyx, quad_state_.v, quad_state_.w;
+  Quaternion q = quad_state_.q();
+  if (q.w() < 0.0) {
+    q.coeffs() = -q.coeffs();
+  }
+
+  Vector<3> pos_error = goal_pos_ - quad_state_.p;
+
+  quad_obs_ << pos_error, q.w(), q.x(), q.y(), q.z(),
+               quad_state_.v, quad_state_.w;
 
   obs.segment<quadenv::kNObs>(quadenv::kObs) = quad_obs_;
   return true;
@@ -113,8 +120,6 @@ Scalar QuadrotorEnv::step(const Ref<Vector<>> act, Ref<Vector<>> obs) {
 
   // update observations
   getObs(obs);
-
-  Matrix<3, 3> rot = quad_state_.q().toRotationMatrix();
 
   // ---------------------- reward function design
   // - position tracking
@@ -182,6 +187,10 @@ bool QuadrotorEnv::loadParam(const YAML::Node &cfg) {
 
 void QuadrotorEnv::setMotorInitMode(int mode) {
   motor_init_mode_ = mode;
+}
+
+void QuadrotorEnv::setGoalPosition(Scalar x, Scalar y, Scalar z) {
+  goal_pos_ << x, y, z;
 }
 
 bool QuadrotorEnv::setMass(Scalar mass) {

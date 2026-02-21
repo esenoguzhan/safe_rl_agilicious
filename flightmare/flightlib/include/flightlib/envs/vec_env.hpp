@@ -59,6 +59,7 @@ class VecEnv {
   bool setEnvMasses(Ref<Vector<>> masses);
   bool setEnvMotorTauInvs(Ref<Vector<>> tau_invs);
   void setMotorInitMode(int mode);
+  bool setEnvGoalPositions(Ref<MatrixRowMajor<>> goals);
 
   // public functions
   inline int getSeed(void) { return seed_; };

@@ -22,18 +22,18 @@ namespace flightlib {
 namespace quadenv {
 
 enum Ctl : int {
-  // observations
+  // observations: [pos(3), quat(4), lin_vel(3), ang_vel(3)] = 13
   kObs = 0,
   //
   kPos = 0,
   kNPos = 3,
   kOri = 3,
-  kNOri = 3,
-  kLinVel = 6,
+  kNOri = 4,
+  kLinVel = 7,
   kNLinVel = 3,
-  kAngVel = 9,
+  kAngVel = 10,
   kNAngVel = 3,
-  kNObs = 12,
+  kNObs = 13,
   // control actions
   kAct = 0,
   kNAct = 4,
@@ -56,6 +56,7 @@ class QuadrotorEnv final : public EnvBase {
   bool setMass(Scalar mass);
   bool setMotorTauInv(Scalar tau_inv);
   void setMotorInitMode(int mode);
+  void setGoalPosition(Scalar x, Scalar y, Scalar z);
 
   // - public get functions
   bool getObs(Ref<Vector<>> obs) override;
@@ -92,6 +93,7 @@ class QuadrotorEnv final : public EnvBase {
   Vector<quadenv::kNObs> obs_mean_ = Vector<quadenv::kNObs>::Zero();
   Vector<quadenv::kNObs> obs_std_ = Vector<quadenv::kNObs>::Ones();
 
+  Vector<3> goal_pos_{0.0, 0.0, 5.0};
   int motor_init_mode_{0};  // 0=zero, 1=hover
 
   YAML::Node cfg_;

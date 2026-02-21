@@ -225,6 +225,15 @@ void VecEnv<EnvBase>::setMotorInitMode(int mode) {
 }
 
 template<typename EnvBase>
+bool VecEnv<EnvBase>::setEnvGoalPositions(Ref<MatrixRowMajor<>> goals) {
+  if (goals.rows() != num_envs_ || goals.cols() != 3) return false;
+  for (int i = 0; i < num_envs_; i++) {
+    envs_[i]->setGoalPosition(goals(i, 0), goals(i, 1), goals(i, 2));
+  }
+  return true;
+}
+
+template<typename EnvBase>
 void VecEnv<EnvBase>::curriculumUpdate(void) {
   for (int i = 0; i < num_envs_; i++) envs_[i]->curriculumUpdate();
 }
