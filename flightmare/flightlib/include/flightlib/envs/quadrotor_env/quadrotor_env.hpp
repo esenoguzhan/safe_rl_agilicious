@@ -57,6 +57,9 @@ class QuadrotorEnv final : public EnvBase {
   bool setMotorTauInv(Scalar tau_inv);
   void setMotorInitMode(int mode);
   void setGoalPosition(Scalar x, Scalar y, Scalar z);
+  void setSpawnRanges(Ref<Vector<>> ranges);
+  void setWorldBox(Ref<Vector<>> box);
+  void initHoverMotors();
 
   // - public get functions
   bool getObs(Ref<Vector<>> obs) override;
@@ -95,6 +98,19 @@ class QuadrotorEnv final : public EnvBase {
 
   Vector<3> goal_pos_{0.0, 0.0, 5.0};
   int motor_init_mode_{0};  // 0=zero, 1=hover
+
+  // Configurable spawn ranges (set from Python/YAML)
+  // Position: absolute world coordinates
+  Vector<3> spawn_pos_min_{-1.0, -1.0,  4.0};
+  Vector<3> spawn_pos_max_{ 1.0,  1.0,  6.0};
+  // Linear velocity per axis
+  Vector<3> spawn_vel_min_{-1.0, -1.0, -1.0};
+  Vector<3> spawn_vel_max_{ 1.0,  1.0,  1.0};
+  // Angular velocity per axis
+  Vector<3> spawn_omega_min_{0.0, 0.0, 0.0};
+  Vector<3> spawn_omega_max_{0.0, 0.0, 0.0};
+  // Orientation randomization: 0=upright, 1=full random
+  Scalar spawn_ori_scale_{1.0};
 
   YAML::Node cfg_;
   Matrix<3, 2> world_box_;

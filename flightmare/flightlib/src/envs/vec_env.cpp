@@ -49,6 +49,7 @@ void VecEnv<EnvBase>::init(void) {
 
   obs_dim_ = envs_[0]->getObsDim();
   act_dim_ = envs_[0]->getActDim();
+  terminal_obs_ = MatrixRowMajor<>::Zero(num_envs_, obs_dim_);
 
   // generate reward names
   // compute it once to get reward names. actual value is not used
@@ -157,6 +158,7 @@ void VecEnv<EnvBase>::perAgentStep(int agent_id, Ref<MatrixRowMajor<>> act,
       envs_[agent_id]->extra_info_[extra_info_names_[j]];
 
   if (done[agent_id]) {
+    terminal_obs_.row(agent_id) = obs.row(agent_id);
     envs_[agent_id]->reset(obs.row(agent_id));
     reward(agent_id) += terminal_reward;
   }
@@ -234,8 +236,34 @@ bool VecEnv<EnvBase>::setEnvGoalPositions(Ref<MatrixRowMajor<>> goals) {
 }
 
 template<typename EnvBase>
+void VecEnv<EnvBase>::setSpawnRanges(Ref<Vector<>> ranges) {
+  for (int i = 0; i < num_envs_; i++) {
+    envs_[i]->setSpawnRanges(ranges);
+  }
+}
+
+template<typename EnvBase>
+void VecEnv<EnvBase>::setWorldBox(Ref<Vector<>> box) {
+  for (int i = 0; i < num_envs_; i++) {
+    envs_[i]->setWorldBox(box);
+  }
+}
+
+template<typename EnvBase>
 void VecEnv<EnvBase>::curriculumUpdate(void) {
   for (int i = 0; i < num_envs_; i++) envs_[i]->curriculumUpdate();
+}
+
+template<typename EnvBase>
+void VecEnv<EnvBase>::getTerminalObs(Ref<MatrixRowMajor<>> obs) {
+  obs = terminal_obs_;
+}
+
+template<typename EnvBase>
+void VecEnv<EnvBase>::reinitHoverMotor(int agent_id) {
+  if (agent_id >= 0 && agent_id < num_envs_) {
+    envs_[agent_id]->initHoverMotors();
+  }
 }
 
 // template<typename EnvBase>

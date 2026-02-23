@@ -36,6 +36,10 @@ PYBIND11_MODULE(flightgym, m) {
     .def("setEnvMotorTauInvs", &VecEnv<QuadrotorEnv>::setEnvMotorTauInvs)
     .def("setMotorInitMode", &VecEnv<QuadrotorEnv>::setMotorInitMode)
     .def("setEnvGoalPositions", &VecEnv<QuadrotorEnv>::setEnvGoalPositions)
+    .def("setSpawnRanges", &VecEnv<QuadrotorEnv>::setSpawnRanges)
+    .def("setWorldBox", &VecEnv<QuadrotorEnv>::setWorldBox)
+    .def("getTerminalObs", &VecEnv<QuadrotorEnv>::getTerminalObs)
+    .def("reinitHoverMotor", &VecEnv<QuadrotorEnv>::reinitHoverMotor)
     .def("__repr__", [](const VecEnv<QuadrotorEnv>& a) {
       return "RPG Drone Racing Environment";
     });

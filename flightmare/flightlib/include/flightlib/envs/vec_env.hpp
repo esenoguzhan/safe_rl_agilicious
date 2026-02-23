@@ -60,6 +60,10 @@ class VecEnv {
   bool setEnvMotorTauInvs(Ref<Vector<>> tau_invs);
   void setMotorInitMode(int mode);
   bool setEnvGoalPositions(Ref<MatrixRowMajor<>> goals);
+  void setSpawnRanges(Ref<Vector<>> ranges);
+  void setWorldBox(Ref<Vector<>> box);
+  void reinitHoverMotor(int agent_id);
+  void getTerminalObs(Ref<MatrixRowMajor<>> obs);
 
   // public functions
   inline int getSeed(void) { return seed_; };
@@ -99,6 +103,7 @@ class VecEnv {
   // auxiliar variables
   int seed_, num_envs_, obs_dim_, act_dim_;
   Matrix<> obs_dummy_;
+  MatrixRowMajor<> terminal_obs_;
 
   // yaml configurations
   YAML::Node cfg_;

@@ -52,23 +52,40 @@ bool QuadrotorEnv::reset(Ref<Vector<>> obs, const bool random) {
   quad_act_.setZero();
 
   if (random) {
-    // randomly reset the quadrotor state
-    // reset position
-    quad_state_.x(QS::POSX) = uniform_dist_(random_gen_);
-    quad_state_.x(QS::POSY) = uniform_dist_(random_gen_);
-    quad_state_.x(QS::POSZ) = uniform_dist_(random_gen_) + 5;
-    if (quad_state_.x(QS::POSZ) < -0.0)
-      quad_state_.x(QS::POSZ) = -quad_state_.x(QS::POSZ);
-    // reset linear velocity
-    quad_state_.x(QS::VELX) = uniform_dist_(random_gen_);
-    quad_state_.x(QS::VELY) = uniform_dist_(random_gen_);
-    quad_state_.x(QS::VELZ) = uniform_dist_(random_gen_);
-    // reset orientation
-    quad_state_.x(QS::ATTW) = uniform_dist_(random_gen_);
-    quad_state_.x(QS::ATTX) = uniform_dist_(random_gen_);
-    quad_state_.x(QS::ATTY) = uniform_dist_(random_gen_);
-    quad_state_.x(QS::ATTZ) = uniform_dist_(random_gen_);
-    quad_state_.qx /= quad_state_.qx.norm();
+    auto randu = [&](Scalar lo, Scalar hi) {
+      return lo + (hi - lo) * (uniform_dist_(random_gen_) * 0.5 + 0.5);
+    };
+
+    // position: absolute world coordinates
+    quad_state_.x(QS::POSX) = randu(spawn_pos_min_(0), spawn_pos_max_(0));
+    quad_state_.x(QS::POSY) = randu(spawn_pos_min_(1), spawn_pos_max_(1));
+    quad_state_.x(QS::POSZ) = randu(spawn_pos_min_(2), spawn_pos_max_(2));
+    if (quad_state_.x(QS::POSZ) < 0.1)
+      quad_state_.x(QS::POSZ) = 0.1;
+
+    // linear velocity
+    quad_state_.x(QS::VELX) = randu(spawn_vel_min_(0), spawn_vel_max_(0));
+    quad_state_.x(QS::VELY) = randu(spawn_vel_min_(1), spawn_vel_max_(1));
+    quad_state_.x(QS::VELZ) = randu(spawn_vel_min_(2), spawn_vel_max_(2));
+
+    // angular velocity
+    quad_state_.x(QS::OMEX) = randu(spawn_omega_min_(0), spawn_omega_max_(0));
+    quad_state_.x(QS::OMEY) = randu(spawn_omega_min_(1), spawn_omega_max_(1));
+    quad_state_.x(QS::OMEZ) = randu(spawn_omega_min_(2), spawn_omega_max_(2));
+
+    // orientation: 0=upright, 1=full random
+    if (spawn_ori_scale_ > 0.0) {
+      quad_state_.x(QS::ATTW) = 1.0 + uniform_dist_(random_gen_) * spawn_ori_scale_;
+      quad_state_.x(QS::ATTX) = uniform_dist_(random_gen_) * spawn_ori_scale_;
+      quad_state_.x(QS::ATTY) = uniform_dist_(random_gen_) * spawn_ori_scale_;
+      quad_state_.x(QS::ATTZ) = uniform_dist_(random_gen_) * spawn_ori_scale_;
+      quad_state_.qx /= quad_state_.qx.norm();
+    } else {
+      quad_state_.x(QS::ATTW) = 1.0;
+      quad_state_.x(QS::ATTX) = 0.0;
+      quad_state_.x(QS::ATTY) = 0.0;
+      quad_state_.x(QS::ATTZ) = 0.0;
+    }
   }
   // reset quadrotor with random states
   quadrotor_ptr_->reset(quad_state_);
@@ -77,16 +94,7 @@ bool QuadrotorEnv::reset(Ref<Vector<>> obs, const bool random) {
   cmd_.t = 0.0;
   cmd_.thrusts.setZero();
 
-  if (motor_init_mode_ == 1) {
-    // hover: set motor omega to steady-state hover speed
-    Scalar hover_thrust = quadrotor_ptr_->getMass() * (-Gz) / 4.0;
-    Vector<4> hover_thrusts = Vector<4>::Ones() * hover_thrust;
-    QuadrotorDynamics dyn;
-    quadrotor_ptr_->getDynamics(&dyn);
-    Vector<4> hover_omega = dyn.motorThrustToOmega(hover_thrusts);
-    quadrotor_ptr_->setMotorOmega(hover_omega);
-    cmd_.thrusts = hover_thrusts;
-  }
+  initHoverMotors();
 
   // obtain observations
   getObs(obs);
@@ -189,8 +197,42 @@ void QuadrotorEnv::setMotorInitMode(int mode) {
   motor_init_mode_ = mode;
 }
 
+void QuadrotorEnv::initHoverMotors() {
+  if (motor_init_mode_ != 1) return;
+  Scalar hover_thrust = quadrotor_ptr_->getMass() * (-Gz) / 4.0;
+  Vector<4> hover_thrusts = Vector<4>::Ones() * hover_thrust;
+  QuadrotorDynamics dyn;
+  quadrotor_ptr_->getDynamics(&dyn);
+  Vector<4> hover_omega = dyn.motorThrustToOmega(hover_thrusts);
+  quadrotor_ptr_->setMotorOmega(hover_omega);
+  cmd_.thrusts = hover_thrusts;
+}
+
 void QuadrotorEnv::setGoalPosition(Scalar x, Scalar y, Scalar z) {
   goal_pos_ << x, y, z;
+}
+
+void QuadrotorEnv::setWorldBox(Ref<Vector<>> box) {
+  // box: 6 floats [x_min, x_max, y_min, y_max, z_min, z_max]
+  Matrix<3, 2> wb;
+  wb << box(0), box(1), box(2), box(3), box(4), box(5);
+  quadrotor_ptr_->setWorldBox(wb);
+  world_box_ = wb;
+}
+
+void QuadrotorEnv::setSpawnRanges(Ref<Vector<>> ranges) {
+  // ranges: 19 floats packed as:
+  //   [pos_x_lo, pos_x_hi, pos_y_lo, pos_y_hi, pos_z_lo, pos_z_hi,
+  //    vel_x_lo, vel_x_hi, vel_y_lo, vel_y_hi, vel_z_lo, vel_z_hi,
+  //    omega_x_lo, omega_x_hi, omega_y_lo, omega_y_hi, omega_z_lo, omega_z_hi,
+  //    ori_scale]
+  spawn_pos_min_ << ranges(0), ranges(2), ranges(4);
+  spawn_pos_max_ << ranges(1), ranges(3), ranges(5);
+  spawn_vel_min_ << ranges(6), ranges(8), ranges(10);
+  spawn_vel_max_ << ranges(7), ranges(9), ranges(11);
+  spawn_omega_min_ << ranges(12), ranges(14), ranges(16);
+  spawn_omega_max_ << ranges(13), ranges(15), ranges(17);
+  spawn_ori_scale_ = ranges(18);
 }
 
 bool QuadrotorEnv::setMass(Scalar mass) {
