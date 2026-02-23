@@ -71,6 +71,24 @@ def _get_QuadrotorEnv_v1():
 _MOTOR_INIT_MODES = {"zero": 0, "hover": 1}
 
 
+def _pack_spawn_ranges(spawn_cfg):
+    """Pack spawn_ranges YAML config into a flat 19-element float32 vector for C++."""
+    def _r(key, default):
+        return spawn_cfg.get(key, default)
+    return np.array([
+        _r("pos_x", [-1.0, 1.0])[0], _r("pos_x", [-1.0, 1.0])[1],
+        _r("pos_y", [-1.0, 1.0])[0], _r("pos_y", [-1.0, 1.0])[1],
+        _r("pos_z", [4.0, 6.0])[0],  _r("pos_z", [4.0, 6.0])[1],
+        _r("vel_x", [-1.0, 1.0])[0], _r("vel_x", [-1.0, 1.0])[1],
+        _r("vel_y", [-1.0, 1.0])[0], _r("vel_y", [-1.0, 1.0])[1],
+        _r("vel_z", [-1.0, 1.0])[0], _r("vel_z", [-1.0, 1.0])[1],
+        _r("ang_vel_x", [0.0, 0.0])[0], _r("ang_vel_x", [0.0, 0.0])[1],
+        _r("ang_vel_y", [0.0, 0.0])[0], _r("ang_vel_y", [0.0, 0.0])[1],
+        _r("ang_vel_z", [0.0, 0.0])[0], _r("ang_vel_z", [0.0, 0.0])[1],
+        _r("ori_scale", 1.0),
+    ], dtype=np.float32)
+
+
 def _make_env(cfg):
     """Create FlightlibVecEnv, optionally inside flightmare_context."""
     QuadrotorEnv_v1 = _get_QuadrotorEnv_v1()
@@ -92,6 +110,14 @@ def _make_env(cfg):
         goals = np.array([[goal_pos[0], goal_pos[1], goal_pos[2]]] * impl.getNumOfEnvs(),
                          dtype=np.float32)
         impl.setEnvGoalPositions(goals)
+
+    spawn_cfg = cfg.get("env", {}).get("spawn_ranges")
+    if spawn_cfg is not None:
+        impl.setSpawnRanges(_pack_spawn_ranges(spawn_cfg))
+
+    world_box = cfg.get("env", {}).get("world_box")
+    if world_box is not None:
+        impl.setWorldBox(np.array(world_box, dtype=np.float32))
 
     return FlightlibVecEnv(impl)
 

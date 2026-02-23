@@ -27,6 +27,18 @@ from scripts.env_wrapper import FlightlibVecEnv, VecMaxEpisodeSteps, DomainRando
 from scripts.record_episode_statistics import VecRecordEpisodeStatistics
 
 MODELS_DIR = "models"
+EVAL_SEED = 7777  # fixed seed for reproducible eval episodes (match curriculum_train.py)
+VECNORM_EPSILON = 1e-4  # epsilon in VecNormalize so std >= sqrt(epsilon) even when variance collapses
+VECNORM_MIN_VAR = 0.01  # minimum variance for all obs dims when loading VecNormalize (avoids extreme scaling)
+
+
+def _clamp_vecnorm_obs_variance(venv, min_var=VECNORM_MIN_VAR):
+    """Clamp all observation variances to at least min_var. Call after VecNormalize.load."""
+    if not hasattr(venv, "obs_rms") or venv.obs_rms is None:
+        return
+    var = venv.obs_rms.var
+    if var.size > 0:
+        np.maximum(var, min_var, out=var)
 
 
 def get_next_ppo_steps_dir(total_timesteps):
@@ -109,6 +121,24 @@ def _resolve_resume_path(resume: str):
     raise FileNotFoundError(f"Cannot resolve --resume path: {resume}")
 
 
+def _pack_spawn_ranges(spawn_cfg):
+    """Pack spawn_ranges YAML config into a flat 19-element float32 vector for C++."""
+    def _r(key, default):
+        return spawn_cfg.get(key, default)
+    return np.array([
+        _r("pos_x", [-1.0, 1.0])[0], _r("pos_x", [-1.0, 1.0])[1],
+        _r("pos_y", [-1.0, 1.0])[0], _r("pos_y", [-1.0, 1.0])[1],
+        _r("pos_z", [4.0, 6.0])[0],  _r("pos_z", [4.0, 6.0])[1],
+        _r("vel_x", [-1.0, 1.0])[0], _r("vel_x", [-1.0, 1.0])[1],
+        _r("vel_y", [-1.0, 1.0])[0], _r("vel_y", [-1.0, 1.0])[1],
+        _r("vel_z", [-1.0, 1.0])[0], _r("vel_z", [-1.0, 1.0])[1],
+        _r("ang_vel_x", [0.0, 0.0])[0], _r("ang_vel_x", [0.0, 0.0])[1],
+        _r("ang_vel_y", [0.0, 0.0])[0], _r("ang_vel_y", [0.0, 0.0])[1],
+        _r("ang_vel_z", [0.0, 0.0])[0], _r("ang_vel_z", [0.0, 0.0])[1],
+        _r("ori_scale", 1.0),
+    ], dtype=np.float32)
+
+
 def _make_env(cfg):
     """Create FlightlibVecEnv, optionally inside flightmare_context and with VecNormalize."""
     QuadrotorEnv_v1 = _get_QuadrotorEnv_v1()
@@ -130,6 +160,14 @@ def _make_env(cfg):
         goals = np.array([[goal_pos[0], goal_pos[1], goal_pos[2]]] * impl.getNumOfEnvs(),
                          dtype=np.float32)
         impl.setEnvGoalPositions(goals)
+
+    spawn_cfg = cfg.get("env", {}).get("spawn_ranges")
+    if spawn_cfg is not None:
+        impl.setSpawnRanges(_pack_spawn_ranges(spawn_cfg))
+
+    world_box = cfg.get("env", {}).get("world_box")
+    if world_box is not None:
+        impl.setWorldBox(np.array(world_box, dtype=np.float32))
 
     env = FlightlibVecEnv(impl)
     return env
@@ -178,6 +216,7 @@ def main():
     custom_reward_cfg = env_cfg.get("custom_reward")
     if custom_reward_cfg and custom_reward_cfg.get("enabled", False):
         env = CustomRewardWrapper(env, custom_reward_cfg)
+        print(f"Custom reward enabled, mode: {custom_reward_cfg.get('mode', 'weighted_exp')}")
     max_episode_steps = env_cfg.get("max_episode_steps")
     if max_episode_steps is not None:
         env = VecMaxEpisodeSteps(env, max_episode_steps)
@@ -195,54 +234,114 @@ def main():
     env = VecRecordEpisodeStatistics(env, deque_size=record_deque_size)
 
     ppo_cfg = cfg.get("ppo", {})
-    policy_kwargs = ppo_cfg.get("policy_kwargs") or {"net_arch": [dict(pi=[128, 128], vf=[128, 128])]}
+    policy_kwargs = ppo_cfg.get("policy_kwargs") or {"net_arch": dict(pi=[128, 128], vf=[128, 128])}
     ppo_kwargs = {k: v for k, v in ppo_cfg.items() if k != "policy_kwargs"}
 
     from stable_baselines3 import PPO
     from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
     from stable_baselines3.common.utils import set_random_seed
+    from stable_baselines3.common.vec_env import VecNormalize, sync_envs_normalization
 
     set_random_seed(seed)
 
-    class SyncVecNormalizeCallback(BaseCallback):
-        """Sync training env VecNormalize stats to eval env so evaluation uses same normalization."""
+    use_vecnorm = normalize_obs or normalize_reward
 
-        def __init__(self, eval_env, verbose=0):
+    class SaveVecNormalizeCallback(BaseCallback):
+        """Save VecNormalize stats alongside checkpoints and best model, and sync to eval env."""
+
+        def __init__(self, save_path, eval_env, verbose=0):
             super().__init__(verbose)
+            self.save_path = save_path
             self.eval_env = eval_env
 
         def _on_step(self):
-            train_env = self.training_env
-            if hasattr(train_env, "obs_rms") and train_env.obs_rms is not None and hasattr(self.eval_env, "obs_rms"):
-                self.eval_env.obs_rms = train_env.obs_rms
+            if use_vecnorm:
+                sync_envs_normalization(self.training_env, self.eval_env)
             return True
+
+        def save_vecnormalize(self, suffix=""):
+            if not use_vecnorm:
+                return
+            fname = f"vecnormalize{suffix}.pkl"
+            self.training_env.save(os.path.join(self.save_path, fname))
+
+    class CheckpointWithNormCallback(CheckpointCallback):
+        """CheckpointCallback that also saves VecNormalize alongside each checkpoint."""
+
+        def __init__(self, save_freq, save_path, name_prefix, vecnorm_cb):
+            super().__init__(save_freq=save_freq, save_path=save_path, name_prefix=name_prefix)
+            self._vecnorm_cb = vecnorm_cb
+
+        def _on_step(self):
+            result = super()._on_step()
+            if self.n_calls % self.save_freq == 0 and self._vecnorm_cb is not None:
+                self._vecnorm_cb.save_vecnormalize(f"_{self.num_timesteps}_steps")
+            return result
+
+    def _unwrap_to_flightlib(env):
+        """Walk the wrapper chain to find the FlightlibVecEnv (has set_seed)."""
+        cur = env
+        while cur is not None:
+            if hasattr(cur, "set_seed") and hasattr(cur, "_impl"):
+                return cur
+            cur = getattr(cur, "venv", None)
+        return None
+
+    class EvalWithNormCallback(EvalCallback):
+        """EvalCallback that saves VecNormalize alongside best_model.zip.
+        Uses fixed eval seed (np.random + C++ env) for reproducible evaluations."""
+
+        def __init__(self, eval_env, best_model_save_path, log_path,
+                     eval_freq, n_eval_episodes, deterministic, vecnorm_cb,
+                     eval_seed=EVAL_SEED):
+            super().__init__(
+                eval_env, best_model_save_path=best_model_save_path,
+                log_path=log_path, eval_freq=eval_freq,
+                n_eval_episodes=n_eval_episodes, deterministic=deterministic,
+            )
+            self._vecnorm_cb = vecnorm_cb
+            self._eval_seed = eval_seed
+            self._base_eval_env = _unwrap_to_flightlib(eval_env)
+
+        def _on_step(self):
+            is_eval_step = (self.eval_freq > 0 and self.n_calls % self.eval_freq == 0)
+            if is_eval_step and self._eval_seed is not None:
+                np.random.seed(self._eval_seed)
+                if self._base_eval_env is not None:
+                    self._base_eval_env.set_seed(self._eval_seed)
+            prev_best = self.best_mean_reward
+            result = super()._on_step()
+            if self.best_mean_reward > prev_best and self._vecnorm_cb is not None:
+                self._vecnorm_cb.save_vecnormalize()
+            return result
 
     # ------------------------------------------------------------------
     # Resume from previous run or create fresh model
     # ------------------------------------------------------------------
     resume_path = args.resume
+    vecnorm_pkl_loaded = None
+
     if resume_path:
         resume_dir, model_zip = _resolve_resume_path(resume_path)
         vecnorm_pkl = os.path.join(resume_dir, "vecnormalize.pkl")
 
-        if (normalize_obs or normalize_reward) and os.path.isfile(vecnorm_pkl):
-            from stable_baselines3.common.vec_env import VecNormalize
+        if use_vecnorm and os.path.isfile(vecnorm_pkl):
+            vecnorm_pkl_loaded = vecnorm_pkl
             env = VecNormalize.load(vecnorm_pkl, env)
+            _clamp_vecnorm_obs_variance(env)
             env.training = True
             env.norm_reward = normalize_reward
-            print(f"Resumed VecNormalize stats from {vecnorm_pkl}")
-        elif normalize_obs or normalize_reward:
-            from stable_baselines3.common.vec_env import VecNormalize
-            env = VecNormalize(env, norm_obs=normalize_obs, norm_reward=normalize_reward, clip_obs=10.0)
+            print(f"Resumed VecNormalize stats from {vecnorm_pkl} (all obs var clamped to >={VECNORM_MIN_VAR})")
+        elif use_vecnorm:
+            env = VecNormalize(env, norm_obs=normalize_obs, norm_reward=normalize_reward, clip_obs=10.0, epsilon=VECNORM_EPSILON)
             print("Warning: --resume specified but no vecnormalize.pkl found; starting fresh normalization")
 
         model = PPO.load(model_zip, env=env, seed=seed, tensorboard_log=run_dir,
                          **ppo_kwargs)
         print(f"Resumed model from {model_zip}")
     else:
-        if normalize_obs or normalize_reward:
-            from stable_baselines3.common.vec_env import VecNormalize
-            env = VecNormalize(env, norm_obs=normalize_obs, norm_reward=normalize_reward, clip_obs=10.0)
+        if use_vecnorm:
+            env = VecNormalize(env, norm_obs=normalize_obs, norm_reward=normalize_reward, clip_obs=10.0, epsilon=VECNORM_EPSILON)
 
         model = PPO(
             policy="MlpPolicy",
@@ -265,36 +364,50 @@ def main():
     cfg_eval["env"]["vec_env"]["num_envs"] = 1
     cfg_eval["env"]["vec_env"]["num_threads"] = 1
     eval_env = _make_env(cfg_eval)
+    if domain_rand_cfg.get("enabled", False) and domain_rand_cfg.get("randomize_goal", False):
+        eval_env = DomainRandomizationWrapper(eval_env, domain_rand_cfg)
     if custom_reward_cfg and custom_reward_cfg.get("enabled", False):
         eval_env = CustomRewardWrapper(eval_env, custom_reward_cfg)
     if max_episode_steps is not None:
         eval_env = VecMaxEpisodeSteps(eval_env, max_episode_steps)
     if action_history_len > 0:
         eval_env = ActionHistoryWrapper(eval_env, action_history_len)
-    if normalize_obs or normalize_reward:
-        from stable_baselines3.common.vec_env import VecNormalize
-        eval_env = VecNormalize(eval_env, norm_obs=normalize_obs, norm_reward=False, clip_obs=10.0)
+    if use_vecnorm:
+        if vecnorm_pkl_loaded:
+            eval_env = VecNormalize.load(vecnorm_pkl_loaded, eval_env)
+            _clamp_vecnorm_obs_variance(eval_env)
+            eval_env.training = False
+            eval_env.norm_reward = False
+        else:
+            eval_env = VecNormalize(eval_env, norm_obs=normalize_obs, norm_reward=False, clip_obs=10.0, epsilon=VECNORM_EPSILON)
+
+    vecnorm_cb = SaveVecNormalizeCallback(run_dir, eval_env)
+
+    eval_cfg = cfg.get("evaluation", {})
+    n_eval_episodes = eval_cfg.get("n_episodes", 5)
 
     callbacks = [
-        SyncVecNormalizeCallback(eval_env),
-        CheckpointCallback(
+        vecnorm_cb,
+        CheckpointWithNormCallback(
             save_freq=save_interval,
             save_path=run_dir,
             name_prefix="ppo_drone",
+            vecnorm_cb=vecnorm_cb,
         ),
-        EvalCallback(
+        EvalWithNormCallback(
             eval_env,
             best_model_save_path=run_dir,
             log_path=run_dir,
             eval_freq=eval_freq,
-            n_eval_episodes=5,
+            n_eval_episodes=n_eval_episodes,
             deterministic=True,
+            vecnorm_cb=vecnorm_cb,
         ),
     ]
 
     model.learn(total_timesteps=total_timesteps, callback=callbacks, progress_bar=True)
     model.save(os.path.join(run_dir, "ppo_drone_final"))
-    if normalize_obs or normalize_reward:
+    if use_vecnorm:
         env.save(os.path.join(run_dir, "vecnormalize.pkl"))
     env.close()
     eval_env.close()

@@ -88,7 +88,6 @@ class FlightlibVecEnv:
         actions = self._pending_actions
         self._pending_actions = None
 
-        obs_before = self._obs.copy()
         ok = self._impl.step(actions, self._obs, self._reward, self._done, self._extra_info)
         if not ok:
             warnings.warn(
@@ -97,6 +96,13 @@ class FlightlibVecEnv:
                 RuntimeWarning,
                 stacklevel=2,
             )
+
+        terminal_obs = None
+        any_done = np.any(self._done)
+        if any_done:
+            terminal_obs = np.zeros_like(self._obs)
+            self._impl.getTerminalObs(terminal_obs)
+
         if self._has_get_obs:
             self._impl.getObs(self._obs)
 
@@ -109,7 +115,7 @@ class FlightlibVecEnv:
                 }
             self._episode_rewards[i].append(float(self._reward[i]))
             if self._done[i]:
-                infos[i]["terminal_observation"] = obs_before[i].copy()
+                infos[i]["terminal_observation"] = terminal_obs[i].copy()
                 infos[i]["episode"] = {
                     "r": sum(self._episode_rewards[i]),
                     "l": len(self._episode_rewards[i]),
@@ -174,9 +180,10 @@ class VecMaxEpisodeSteps:
         obs, rewards, dones, infos = self.venv.step_wait()
         self._episode_steps += 1
         for i in range(self._num_envs):
-            if self._episode_steps[i] >= self._max_steps:
+            if not dones[i] and self._episode_steps[i] >= self._max_steps:
                 dones[i] = True
                 infos[i]["terminal_observation"] = obs[i].copy()
+                infos[i]["TimeLimit.truncated"] = True
             if dones[i]:
                 self._episode_steps[i] = 0
         return obs, rewards, dones, infos
@@ -242,6 +249,8 @@ class DomainRandomizationWrapper:
             new_masses = np.random.uniform(lo, hi, size=len(env_ids)).astype(np.float32)
             self._current_masses[env_ids] = new_masses
             self._impl.setEnvMasses(self._current_masses)
+            for i in env_ids:
+                self._impl.reinitHoverMotor(int(i))
 
         if self._motor_tau_range is not None:
             lo, hi = self._motor_tau_range
