@@ -5,3 +5,6 @@ numpy>=1.20.0
 PyYAML>=5.4
 stable-baselines3>=2.0.0
 matplotlib>=3.5.0
+
+# CBF filter (scripts/cbf_filter.py): OSQP for QP solver
+osqp>=0.6.0

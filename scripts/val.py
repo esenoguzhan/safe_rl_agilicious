@@ -235,6 +235,8 @@ def main():
     parser.add_argument("--episodes", type=int, default=None, help="Override evaluation.n_episodes")
     parser.add_argument("--save_plots", action="store_true", help="Save figures to disk")
     parser.add_argument("--plot_dir", type=str, default=None, help="Directory to save plots")
+    parser.add_argument("--use_cbf", action="store_true",
+                        help="Wrap env with CBF safety filter (position barriers). Use for safe deployment only.")
     parser.add_argument("--goal", type=float, nargs=3, default=None, metavar=("X", "Y", "Z"),
                         help="Override goal position [x y z] (default: from config)")
     args = parser.parse_args()
@@ -273,6 +275,17 @@ def main():
     state_obs_dim = env.observation_space.shape[0]
     if action_history_len > 0:
         env = ActionHistoryWrapper(env, action_history_len)
+
+    if getattr(args, "use_cbf", False):
+        from scripts.cbf_wrapper import CBFWrapper
+        goal_pos = cfg_val.get("env", {}).get("goal_position", [0.0, 0.0, 5.0])
+        qd = env_cfg.get("quadrotor_dynamics", {})
+        mass = float(qd.get("mass", 0.774))
+        g = 9.81
+        act_mean = np.full(4, (mass * g) / 4.0, dtype=np.float32)
+        act_std = np.full(4, (mass * 2 * g) / 4.0, dtype=np.float32)
+        env = CBFWrapper(env, goal_position=goal_pos, act_mean=act_mean, act_std=act_std)
+        print("CBF safety filter enabled (position barriers).")
 
     training_cfg = cfg.get("training", {})
     normalize_obs = training_cfg.get("normalize_obs", True)
