@@ -4,6 +4,7 @@
 #pragma once
 
 // standard library
+#include <cstdint>
 #include <unistd.h>
 #include <memory>
 #include <random>
@@ -36,7 +37,11 @@ class EnvBase {
   virtual bool isTerminalState(Scalar &reward);
 
   // auxilirary functions
-  inline void setSeed(const int seed) { std::srand(seed); };
+  // Reseed the RNG used by reset() so same seed => same initial state (deterministic sim).
+  inline void setSeed(const int seed) {
+    std::srand(seed);
+    random_gen_.seed(static_cast<std::mt19937::result_type>(static_cast<std::uint32_t>(seed)));
+  }
   inline int getObsDim() { return obs_dim_; };
   inline int getActDim() { return act_dim_; };
   inline Scalar getSimTimeStep() { return sim_dt_; };
