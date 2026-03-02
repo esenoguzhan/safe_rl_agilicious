@@ -205,6 +205,91 @@ class VecMaxEpisodeSteps:
         return getattr(self.venv, name)
 
 
+class ObservationNoiseWrapper:
+    """
+    VecEnv wrapper that adds zero-mean Gaussian noise to position (obs 0:3)
+    and linear velocity (obs 7:10) to reduce memorization and improve robustness.
+    Config: {"position": std_pos, "velocity": std_vel} (floats, std in same units as obs).
+
+    Uses its own independent RandomState so it never interferes with the
+    global numpy RNG (important for reproducible eval with fixed seeds).
+    """
+
+    # Observation layout: [pos_error(3), q(4), lin_vel(3), omega(3)]
+    POS_SLICE = slice(0, 3)
+    VEL_SLICE = slice(7, 10)
+
+    def __init__(self, venv, noise_cfg, rng_seed=42):
+        self.venv = venv
+        self._num_envs = venv.num_envs
+        self._std_pos = float(noise_cfg.get("position", 0.0))
+        self._std_vel = float(noise_cfg.get("velocity", 0.0))
+        self._rng = np.random.RandomState(rng_seed)
+
+    @property
+    def num_envs(self):
+        return self._num_envs
+
+    @property
+    def observation_space(self):
+        return self.venv.observation_space
+
+    @property
+    def action_space(self):
+        return self.venv.action_space
+
+    def _add_noise(self, obs):
+        if obs.size == 0:
+            return obs
+        obs = np.asarray(obs, dtype=np.float32)
+        if obs.ndim == 1:
+            obs = obs.reshape(1, -1)
+        n_envs = obs.shape[0]
+        if self._std_pos > 0:
+            obs[:, self.POS_SLICE] += self._rng.normal(
+                0, self._std_pos, size=(n_envs, 3)
+            ).astype(np.float32)
+        if self._std_vel > 0:
+            obs[:, self.VEL_SLICE] += self._rng.normal(
+                0, self._std_vel, size=(n_envs, 3)
+            ).astype(np.float32)
+        return obs
+
+    def reset(self, **kwargs):
+        out = self.venv.reset(**kwargs)
+        obs = out[0] if isinstance(out, tuple) else out
+        return self._add_noise(np.asarray(obs, dtype=np.float32))
+
+    def step_async(self, actions):
+        self.venv.step_async(actions)
+
+    def step_wait(self):
+        obs, rewards, dones, infos = self.venv.step_wait()
+        obs = self._add_noise(obs)
+        if np.any(dones):
+            for i in np.where(dones)[0]:
+                if "terminal_observation" in infos[i]:
+                    tobs = np.asarray(infos[i]["terminal_observation"], dtype=np.float32)
+                    noised = self._add_noise(tobs.reshape(1, -1))
+                    infos[i]["terminal_observation"] = noised[0]
+        return obs, rewards, dones, infos
+
+    def step(self, actions):
+        self.step_async(actions)
+        return self.step_wait()
+
+    def close(self):
+        self.venv.close()
+
+    def env_is_wrapped(self, wrapper_class, indices=None):
+        if hasattr(self.venv, "env_is_wrapped"):
+            return self.venv.env_is_wrapped(wrapper_class, indices=indices)
+        return (False,) * self._num_envs
+
+    def __getattr__(self, name):
+        return getattr(self.venv, name)
+
+
 class DomainRandomizationWrapper:
     """
     VecEnv wrapper that randomizes mass, motor_tau, and goal position
