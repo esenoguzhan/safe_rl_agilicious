@@ -1,0 +1,36 @@
+# MPC (Model Predictive Control) config for quadrotor goal tracking.
+# Used by scripts/mpc_controller.py and scripts/eval_mpc.py.
+# Comparable with RL+CBF evaluation (scripts/eval_cbf.py).
+
+mpc:
+  # Prediction horizon
+  N: 20                            # number of shooting intervals
+  dt: 0.02                         # discretization step (match sim_dt)
+
+  # Cost weights — diagonal entries of Q (state) and R (control) matrices.
+  # State reference: p=goal, q=[1,0,0,0], v=0, omega=0.
+  Q_pos: [8.0, 8.0, 15.0]      # position tracking [x, y, z]
+  Q_vel: [1.0, 1.0, 1.0]          # velocity regulation
+  Q_omega: [1.0, 1.0, 1.0]        # angular rate regulation
+  Q_quat: [5.0, 1.0, 1.0, 1.0]    # quaternion error (w, x, y, z)
+  R: [0.01, 0.01, 0.01, 0.01]     # control effort (per-motor thrust)
+
+  # Terminal cost multiplier: Q_terminal = terminal_weight * Q
+  terminal_weight: 10.0
+
+  # State constraints (box on position; matches CBF barrier layout)
+  pos_min: [-4.0, -4.0, 0.5]
+  pos_max: [4.0, 4.0, 10.0]
+
+  # Solver settings (acados)
+  max_iter: 5                     # SQP iterations per solve (RTI: 1, full SQP: up to max_iter)
+  qp_solver: PARTIAL_CONDENSING_HPIPM
+  nlp_solver: SQP                 # SQP (full) for robustness; SQP_RTI for speed
+  integrator: ERK                 # ERK (explicit RK) or IRK (implicit RK)
+  integrator_steps: 4             # number of integrator sub-steps per interval
+
+  # Reference (default; can be overridden via --goal CLI)
+  goal_position: [0.0, 0.0, 5.0]
+
+  # Quadrotor model config path (null = default configs/quadrotor_model.yaml)
+  quadrotor_model_path: null

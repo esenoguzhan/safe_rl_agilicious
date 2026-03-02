@@ -1,0 +1,68 @@
+# CBF filter config (position barriers only).
+# Used when wrapping a trained RL policy for safe deployment (not during training).
+# Formulation: u = u_RL + u_CBF, minimize ||u_CBF||^2 s.t. barrier conditions and actuator limits.
+
+cbf:
+  # Use discrete CBF (paper-style): h_{k+1} >= (1 - gamma)*h_k with sigma/gamma shaping.
+  # If false, use continuous-time: L_f h + L_g h * u >= -alpha * h.
+  discrete_cbf: true
+
+  # Continuous-time (when discrete_cbf: false): L_f h + L_g h * u >= -alpha * h.
+  alpha: 0.5
+
+  # Discrete CBF (when discrete_cbf: true): time step and gamma/sigma shaping.
+  # h_k1 = h_k + L_f_h*dt + 0.5*dt^2*n'g + 0.5*dt^2*L_g_h*u; constraint h_k1 >= (1-gamma)*h_k.
+  # sigma = 1/(1+exp(sigma_param*h)), gamma = gamma_max - (gamma_max - gamma_min)*sigma.
+  dt: 0.02
+  gamma_min: 0.1
+  gamma_max: 0.8
+  sigma_param: 10.0
+  # Use quadrotor model step() for discrete CBF (exact dynamics, linearized in u). If false, use Lie-derivative formula.
+  discrete_cbf_use_model_step: true
+  # Integration for model.step when discrete_cbf_use_model_step: "euler" or "rk4" (match eval rollout).
+  integrate: "euler"
+
+  # UAV radius / safety margin (paper Sec 3.1): effective barrier uses q_eff = q - r_uav so that
+  # max barriers enforce (bound - r_uav) - p >= 0, min barriers p - (bound + r_uav) >= 0.
+  r_uav: 0.0
+
+  # Position barriers: velocity-aware h(p,v) = n'p + q + kv*(n'v). Safe iff h >= 0.
+  # kv > 0: as approach speed (n'v < 0) increases, h decreases → earlier intervention.
+  # n = normal, q = offset. kv default 0.5 if omitted.
+  position_barriers:
+    - name: ground
+      n: [0.0, 0.0, 1.0]
+      q: 1.0
+      kv: 0.5
+    - name: ceiling
+      n: [0.0, 0.0, -1.0]
+      q: 4.0
+      kv: 0.5
+    - name: x_min
+      n: [1.0, 0.0, 0.0]
+      q: 4.0
+      kv: 0.5
+    - name: x_max
+      n: [-1.0, 0.0, 0.0]
+      q: 4.0
+      kv: 0.5
+    - name: y_min
+      n: [0.0, 1.0, 0.0]
+      q: 4.0
+      kv: 0.5
+    - name: y_max
+      n: [0.0, -1.0, 0.0]
+      q: 4.0
+      kv: 0.5
+
+  # QP solver: "acados" (HPIPM, recommended with discrete CBF), "osqp", or "scipy".
+  solver: acados
+  # OSQP max iterations (only when solver is osqp or fallback; default 4000).
+  max_iter: 10000
+
+  # Slack: soft CBF constraint h_{k+1} >= eta*h_k - epsilon_j; minimize ||u_CBF||^2 + K_lin*sum(epsilon_j).
+  use_slack: false
+  K_lin: 1e8   # linear slack penalty (large to prefer safety; allows QP to stay feasible)
+
+  # Quadrotor model config (for dynamics L_f h, L_g h). Same file as quadrotor_model.yaml.
+  quadrotor_model_path: null   # null = use default configs/quadrotor_model.yaml
