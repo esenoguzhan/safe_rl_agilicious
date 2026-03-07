@@ -38,6 +38,7 @@ from scripts.env_wrapper import (
     FlightlibVecEnv,
     VecMaxEpisodeSteps,
     DomainRandomizationWrapper,
+    ObservationNoiseWrapper,
     ActionHistoryWrapper,
 )
 from scripts.record_episode_statistics import VecRecordEpisodeStatistics
@@ -54,16 +55,16 @@ REWARD_THRESHOLD = 850
 LENGTH_THRESHOLD = 1000
 PATIENCE = 5            # consecutive eval windows above threshold (legacy, unused)
 CHECK_FREQ = 8192        # steps between training threshold checks (legacy, unused)
-EVAL_PATIENCE = 5 #3       # consecutive eval passes above threshold before advancing
+EVAL_PATIENCE = 3 #3       # consecutive eval passes above threshold before advancing
 
 MAX_PHASE_TIMESTEPS = 3_000_000
-EVAL_FREQ = 12_500
+EVAL_FREQ = 6 #12_500
 SAVE_INTERVAL = 100_000
 LOG_STD_START = -1.0        # floor at stage entry (std ≈ 0.37)
 LOG_STD_END   = -2.5        # floor at end of anneal (std ≈ 0.08)
 LOG_STD_WARMUP = 0.10       # fraction of stage steps: hold start floor (explore)
 LOG_STD_DECAY  = 0.40       # fraction of stage steps: linear ramp to end floor
-EVAL_SEED = 7777            # fixed seed for reproducible eval episodes
+EVAL_SEED = 7777            # Validation: fixed benchmark seed for comparable eval during training.
 
 # ---------------------------------------------------------------------------
 # Env / PPO base config (matches drone_ppo_default.yaml structure)
@@ -128,7 +129,7 @@ BASE_CONFIG = {
         },
     },
     "ppo": {
-        "learning_rate": 3.0e-5,
+        "learning_rate": 1.0e-4,
         "n_steps": 2048,
         "batch_size": 512,
         "n_epochs": 10,
@@ -139,7 +140,7 @@ BASE_CONFIG = {
         "vf_coef": 0.5,
         "max_grad_norm": 0.5,
         "policy_kwargs": {
-            "net_arch": {"pi": [256, 256], "vf": [256, 256]},
+            "net_arch": {"pi": [256, 256], "vf": [512, 512]},
             "log_std_init": -1.0,
         },
     },
@@ -547,12 +548,29 @@ def make_env(cfg, num_envs_override=None):
 
 
 def wrap_env(env, cfg, *, add_domain_rand=True, add_record_stats=True):
-    """Apply the standard wrapper stack on top of a raw FlightlibVecEnv."""
+    """Apply the standard wrapper stack on top of a raw FlightlibVecEnv.
+
+    Wrapper order (inner → outer):
+      FlightlibVecEnv
+        → ObservationNoiseWrapper
+        → CustomRewardWrapper        (reward, crash penalty, OOB termination)
+        → VecMaxEpisodeSteps         (truncation at max_steps)
+        → DomainRandomizationWrapper (goal/mass/tau randomization on ANY done)
+        → ActionHistoryWrapper
+        → VecRecordEpisodeStatistics
+        → VecNormalize               (applied outside this function)
+
+    DomainRandomizationWrapper MUST be outside VecMaxEpisodeSteps so that
+    truncation dones trigger goal re-randomization.  Otherwise goals stay
+    fixed for the entire training run and the agent never learns navigation.
+    """
     env_cfg = cfg.get("env", {})
 
-    dr_cfg = env_cfg.get("domain_randomization", {})
-    if add_domain_rand and dr_cfg.get("enabled", False):
-        env = DomainRandomizationWrapper(env, dr_cfg)
+    obs_noise_cfg = env_cfg.get("observation_noise")
+    if isinstance(obs_noise_cfg, dict) and (
+        obs_noise_cfg.get("position", 0) > 0 or obs_noise_cfg.get("velocity", 0) > 0
+    ):
+        env = ObservationNoiseWrapper(env, obs_noise_cfg)
 
     cr_cfg = env_cfg.get("custom_reward")
     if cr_cfg and cr_cfg.get("enabled", False):
@@ -561,6 +579,10 @@ def wrap_env(env, cfg, *, add_domain_rand=True, add_record_stats=True):
     max_steps = env_cfg.get("max_episode_steps")
     if max_steps is not None:
         env = VecMaxEpisodeSteps(env, max_steps)
+
+    dr_cfg = env_cfg.get("domain_randomization", {})
+    if add_domain_rand and dr_cfg.get("enabled", False):
+        env = DomainRandomizationWrapper(env, dr_cfg)
 
     ahl = env_cfg.get("action_history_len", 0)
     if ahl > 0:
@@ -668,6 +690,44 @@ def _unwrap_to_flightlib(env):
     return None
 
 
+class EpisodeReseedWrapper:
+    """VecEnv wrapper: count episode terminations and reseed the base env every N episodes.
+    Use reseed_every_n_episodes=1 for a new seed every episode; 0 to disable.
+    Exposes num_envs and _num_envs for VecRecordEpisodeStatistics compatibility."""
+    def __init__(self, venv, run_seed, reseed_every_n_episodes):
+        self.venv = venv
+        self._run_seed = run_seed
+        self._reseed_every = int(reseed_every_n_episodes)
+        self._episodes_finished = 0
+        self.observation_space = venv.observation_space
+        self.action_space = venv.action_space
+        n = getattr(venv, "num_envs", getattr(venv, "_num_envs", None))
+        self.num_envs = self._num_envs = n
+
+    def step_async(self, actions):
+        self.venv.step_async(actions)
+
+    def step_wait(self):
+        obs, rewards, dones, infos = self.venv.step_wait()
+        self._episodes_finished += int(np.sum(dones))
+        if self._reseed_every > 0 and self._episodes_finished > 0 and self._episodes_finished % self._reseed_every == 0:
+            base = _unwrap_to_flightlib(self)
+            if base is not None:
+                new_seed = self._run_seed + self._episodes_finished
+                np.random.seed(new_seed)
+                base.set_seed(new_seed)
+        return obs, rewards, dones, infos
+
+    def reset(self):
+        return self.venv.reset()
+
+    def seed(self, seed=None):
+        """SB3 BaseVecEnv calls env.seed(seed); forward to inner env."""
+        if hasattr(self.venv, "seed"):
+            return self.venv.seed(seed)
+        return None
+
+
 class EvalWithNormCallback(EvalCallback):
     """EvalCallback that saves VecNormalize alongside best_model.zip,
     reseeds both Python and C++ RNGs for reproducible evaluations, and
@@ -678,7 +738,8 @@ class EvalWithNormCallback(EvalCallback):
                  eval_seed=None,
                  eval_reward_thr=None, eval_length_thr=None,
                  eval_patience=EVAL_PATIENCE,
-                 eval_success_rate_thr=None):
+                 eval_success_rate_thr=None,
+                 verbose_eval=False):
         super().__init__(
             eval_env, best_model_save_path=best_model_save_path,
             log_path=log_path, eval_freq=eval_freq,
@@ -690,6 +751,7 @@ class EvalWithNormCallback(EvalCallback):
         self._eval_length_thr = eval_length_thr
         self._eval_patience = eval_patience
         self._eval_success_rate_thr = eval_success_rate_thr
+        self._verbose_eval = verbose_eval
         self._eval_streak = 0
         self.threshold_met = False
         self._base_eval_env = _unwrap_to_flightlib(eval_env)
@@ -720,14 +782,29 @@ class EvalWithNormCallback(EvalCallback):
                 if self._vecnorm_cb is not None:
                     self._vecnorm_cb.save_vecnormalize()
 
-            # Success = episode reached length_thr and reward_thr
-            episode_lengths = np.array(episode_lengths)
-            episode_rewards = np.array(episode_rewards)
-            success = ((episode_lengths >= self._eval_length_thr)
-                       & (episode_rewards >= self._eval_reward_thr))
+            # Emit same eval logs as base EvalCallback so eval row appears in SB3 table
+            episode_lengths_arr = np.array(episode_lengths)
+            episode_rewards_arr = np.array(episode_rewards)
+            mean_ep_len = float(np.mean(episode_lengths_arr))
+            success = ((episode_lengths_arr >= self._eval_length_thr)
+                       & (episode_rewards_arr >= self._eval_reward_thr))
             success_rate = float(np.mean(success))
+            n_succ = int(success.sum())
+
+            self.logger.record("eval/mean_reward", self.last_mean_reward)
+            self.logger.record("eval/mean_ep_length", mean_ep_len)
+            self.logger.record("time/total_timesteps", self.num_timesteps, exclude="tensorboard")
+            self.logger.dump(self.num_timesteps)
 
             cur_std = float(self.model.policy.log_std.exp().mean())
+            if self._verbose_eval:
+                print(f"  [Curriculum] EVAL steps={self.num_timesteps} "
+                      f"success={n_succ}/{len(success)} ({success_rate:.0%}) "
+                      f"mean_rew={self.last_mean_reward:.1f} mean_len={mean_ep_len:.0f} std={cur_std:.3f}")
+
+            # Success = episode reached length_thr and reward_thr
+            episode_lengths = episode_lengths_arr
+            episode_rewards = episode_rewards_arr
             if success_rate >= self._eval_success_rate_thr:
                 self._eval_streak += 1
                 print(f"  [Curriculum] EVAL pass {self._eval_streak}/"
@@ -863,11 +940,18 @@ def train_phase(phase, cfg, output_dir, seed, prev_model_dir=None):
 
     set_random_seed(seed)
     np.random.seed(seed)
+    # Training layer: use run seed so different runs (--seed 1, 2, 3, ...) see different scenarios.
+    if "env" not in cfg:
+        cfg["env"] = {}
+    if "vec_env" not in cfg["env"]:
+        cfg["env"]["vec_env"] = {}
+    cfg["env"]["vec_env"]["seed"] = seed
 
     training_cfg = cfg.get("training", {})
     normalize_obs = training_cfg.get("normalize_obs", True)
     normalize_reward = training_cfg.get("normalize_reward", False)
     use_vecnorm = normalize_obs or normalize_reward
+    eval_freq = training_cfg.get("eval_freq", EVAL_FREQ)
 
     vecnorm_pkl = None
     if prev_model_dir:
@@ -878,6 +962,10 @@ def train_phase(phase, cfg, output_dir, seed, prev_model_dir=None):
     # ---- training env ----
     train_raw = make_env(cfg)
     train_env = wrap_env(train_raw, cfg, add_domain_rand=True, add_record_stats=True)
+    reseed_every_n_episodes = phase.get("reseed_every_n_episodes", 0)
+    if reseed_every_n_episodes > 0:
+        train_env = EpisodeReseedWrapper(train_env, seed, reseed_every_n_episodes)
+        print(f"  Training env: reseed every {reseed_every_n_episodes} episode(s) (run_seed + episode_count)")
     if use_vecnorm:
         if vecnorm_pkl:
             train_env = VecNormalize.load(vecnorm_pkl, train_env)
@@ -957,13 +1045,13 @@ def train_phase(phase, cfg, output_dir, seed, prev_model_dir=None):
     vecnorm_cb = SaveVecNormalizeCallback(phase_dir, eval_env)
 
     n_eval_episodes = phase.get("n_eval_episodes", 20)
-    eval_seed = EVAL_SEED
+    eval_seed = None
 
     eval_cb = EvalWithNormCallback(
         eval_env,
         best_model_save_path=phase_dir,
         log_path=phase_dir,
-        eval_freq=EVAL_FREQ,
+        eval_freq=eval_freq,
         n_eval_episodes=n_eval_episodes,
         deterministic=True,
         vecnorm_cb=vecnorm_cb,
@@ -972,6 +1060,7 @@ def train_phase(phase, cfg, output_dir, seed, prev_model_dir=None):
         eval_length_thr=phase.get("eval_length_threshold"),
         eval_patience=phase.get("eval_patience", EVAL_PATIENCE),
         eval_success_rate_thr=phase.get("eval_success_rate_threshold"),
+        verbose_eval=phase.get("eval_print_every_time", False),
     )
 
     callbacks = [
@@ -1017,6 +1106,85 @@ def train_phase(phase, cfg, output_dir, seed, prev_model_dir=None):
     eval_env.close()
 
     return phase_dir
+
+
+# Default seeds for test/final layer (mean ± std report)
+FINAL_EVAL_SEEDS_DEFAULT = [100, 200, 300, 400, 500]
+
+
+def run_final_eval(phase_dir, cfg, seed_list, n_eval_episodes, eval_domain_rand=False):
+    """Test/Final layer: run the saved policy on multiple fixed seeds and report mean ± std.
+    Loads best_model.zip (or ppo_drone_final.zip) and vecnormalize.pkl from phase_dir."""
+    from stable_baselines3 import PPO
+
+    cfg = copy.deepcopy(cfg)
+    if "env" not in cfg:
+        cfg["env"] = {}
+    if "vec_env" not in cfg["env"]:
+        cfg["env"]["vec_env"] = {}
+    cfg["env"]["vec_env"]["num_envs"] = 1
+    cfg["env"]["vec_env"]["num_threads"] = 1
+
+    eval_raw = make_env(cfg, num_envs_override=1)
+    eval_env = wrap_env(eval_raw, cfg, add_domain_rand=eval_domain_rand, add_record_stats=False)
+
+    training_cfg = cfg.get("training", {})
+    normalize_obs = training_cfg.get("normalize_obs", True)
+    normalize_reward = training_cfg.get("normalize_reward", False)
+    use_vecnorm = normalize_obs or normalize_reward
+
+    if use_vecnorm:
+        for name in ("vecnormalize.pkl", "vecnormalize_final.pkl"):
+            pkl = os.path.join(phase_dir, name)
+            if os.path.isfile(pkl):
+                eval_env = VecNormalize.load(pkl, eval_env)
+                _clamp_vecnorm_obs_variance(eval_env)
+                break
+        else:
+            eval_env = VecNormalize(
+                eval_env, norm_obs=normalize_obs, norm_reward=False,
+                clip_obs=10.0, epsilon=VECNORM_EPSILON,
+            )
+        eval_env.training = False
+        eval_env.norm_reward = False
+
+    model_zip = None
+    for name in ("best_model.zip", "ppo_drone_final.zip"):
+        c = os.path.join(phase_dir, name)
+        if os.path.isfile(c):
+            model_zip = c
+            break
+    if not model_zip:
+        print(f"  [run_final_eval] No model found in {phase_dir}, skipping final eval.")
+        eval_env.close()
+        return
+
+    model = PPO.load(model_zip, env=eval_env)
+
+    base_eval = _unwrap_to_flightlib(eval_env)
+    mean_rewards = []
+    for s in seed_list:
+        np.random.seed(s)
+        if base_eval is not None:
+            base_eval.set_seed(s)
+        mean_r, _ = evaluate_policy(
+            model, eval_env, n_eval_episodes=n_eval_episodes, deterministic=True,
+        )
+        mean_rewards.append(mean_r)
+    mean_rewards = np.array(mean_rewards)
+
+    print("\nFinal evaluation (test layer, multiple fixed seeds):")
+    for s, r in zip(seed_list, mean_rewards):
+        print(f"  Seed {s}: mean_reward = {r:.2f}")
+    print(f"  Across seeds: mean = {mean_rewards.mean():.2f} ± {mean_rewards.std():.2f}")
+    results_path = os.path.join(phase_dir, "final_eval_results.txt")
+    with open(results_path, "w") as f:
+        f.write("seed,mean_reward\n")
+        for s, r in zip(seed_list, mean_rewards):
+            f.write(f"{s},{r}\n")
+        f.write(f"\nmean,std\n{mean_rewards.mean()},{mean_rewards.std()}\n")
+    print(f"  Results written to {results_path}")
+    eval_env.close()
 
 
 def main():

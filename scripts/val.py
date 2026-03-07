@@ -19,7 +19,7 @@ if _REPO_ROOT not in sys.path:
 from scripts.config_loader import load_config, prepare_env_run_dir, get_vec_env_config_string
 from scripts.context import flightmare_context
 from scripts.custom_reward_wrapper import CustomRewardWrapper
-from scripts.env_wrapper import FlightlibVecEnv, ActionHistoryWrapper
+from scripts.env_wrapper import FlightlibVecEnv, ActionHistoryWrapper, ObservationNoiseWrapper
 
 
 def _ensure_flightgym_path():
@@ -255,18 +255,34 @@ def main():
     eval_cfg = cfg_val.get("evaluation", {})
     n_episodes = args.episodes if args.episodes is not None else eval_cfg.get("n_episodes", 5)
     deterministic = eval_cfg.get("deterministic", True)
-    # Flightlib only sets done on ground contact; cap steps so episodes always end (e.g. max_t=5s @ 0.02 => 250)
-    max_episode_steps = eval_cfg.get("max_episode_steps", 250)
-    seed = args.seed if args.seed is not None else cfg.get("training", {}).get("seed", 0)
+    max_episode_steps = eval_cfg.get(
+        "max_episode_steps",
+        cfg_val.get("env", {}).get("max_episode_steps", 1000),
+    )
+
+    if args.seed is not None:
+        seed = args.seed
+    else:
+        seed = np.random.randint(0, 2**31)
+        print(f"Using random seed: {seed}  (pass --seed {seed} to reproduce)")
 
     if args.goal is not None:
         cfg_val["env"]["goal_position"] = list(args.goal)
 
-    if seed is not None:
-        np.random.seed(seed)
+    np.random.seed(seed)
+    cfg_val["env"]["vec_env"]["seed"] = seed
 
     env = _make_env(cfg_val)
     env_cfg = cfg.get("env", {})
+
+    obs_noise_cfg = env_cfg.get("observation_noise")
+    if isinstance(obs_noise_cfg, dict) and (
+        obs_noise_cfg.get("position", 0) > 0 or obs_noise_cfg.get("velocity", 0) > 0
+    ):
+        env = ObservationNoiseWrapper(env, obs_noise_cfg)
+        print(f"Observation noise: position={obs_noise_cfg.get('position', 0)}, "
+              f"velocity={obs_noise_cfg.get('velocity', 0)}")
+
     custom_reward_cfg = env_cfg.get("custom_reward")
     if custom_reward_cfg and custom_reward_cfg.get("enabled", False):
         env = CustomRewardWrapper(env, custom_reward_cfg)
@@ -310,7 +326,11 @@ def main():
 
     returns = []
     lengths = []
+    base_env = env
+    while hasattr(base_env, "venv"):
+        base_env = base_env.venv
     for ep in range(n_episodes):
+        base_env.seed(seed + ep)
         obs = env.reset()
         if isinstance(obs, tuple):
             obs = obs[0]

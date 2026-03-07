@@ -293,15 +293,22 @@ class ObservationNoiseWrapper:
 class DomainRandomizationWrapper:
     """
     VecEnv wrapper that randomizes mass, motor_tau, and goal position
-    per-env at each episode reset.
+    per-env at each episode boundary (crash, OOB, or truncation).
+
+    IMPORTANT: This wrapper must sit OUTSIDE VecMaxEpisodeSteps so that
+    truncation dones also trigger goal re-randomization.  Otherwise goals
+    stay fixed for the entire training run and the agent never learns
+    navigation to arbitrary targets.
+
     Requires the underlying FlightlibVecEnv._impl to expose
-    setEnvMasses / setEnvMotorTauInvs / setEnvGoalPositions.
+    setEnvMasses / setEnvMotorTauInvs / setEnvGoalPositions / getObs.
     """
 
     def __init__(self, venv, domain_rand_cfg):
         self.venv = venv
         self._num_envs = venv.num_envs
         self._impl = venv._impl
+        self._obs_dim = venv.observation_space.shape[0]
 
         self._mass_range = domain_rand_cfg.get("mass_range") if domain_rand_cfg.get("randomize_mass", False) else None
         self._motor_tau_range = domain_rand_cfg.get("motor_tau_range") if domain_rand_cfg.get("randomize_motor_tau", False) else None
@@ -323,12 +330,23 @@ class DomainRandomizationWrapper:
     def action_space(self):
         return self.venv.action_space
 
-    def _randomize_envs(self, env_ids=None):
-        if env_ids is None:
-            env_ids = np.arange(self._num_envs)
+    def _randomize_goal(self, env_ids):
+        """Randomize goal positions for the given env indices."""
+        if self._goal_pos_range is None or len(env_ids) == 0:
+            return
+        x_range = self._goal_pos_range.get("x", [0.0, 0.0])
+        y_range = self._goal_pos_range.get("y", [0.0, 0.0])
+        z_range = self._goal_pos_range.get("z", [3.0, 7.0])
+        for i in env_ids:
+            self._current_goals[i, 0] = np.random.uniform(x_range[0], x_range[1])
+            self._current_goals[i, 1] = np.random.uniform(y_range[0], y_range[1])
+            self._current_goals[i, 2] = np.random.uniform(z_range[0], z_range[1])
+        self._impl.setEnvGoalPositions(self._current_goals)
+
+    def _randomize_dynamics(self, env_ids):
+        """Randomize mass and motor_tau for the given env indices."""
         if len(env_ids) == 0:
             return
-
         if self._mass_range is not None:
             lo, hi = self._mass_range
             new_masses = np.random.uniform(lo, hi, size=len(env_ids)).astype(np.float32)
@@ -336,7 +354,6 @@ class DomainRandomizationWrapper:
             self._impl.setEnvMasses(self._current_masses)
             for i in env_ids:
                 self._impl.reinitHoverMotor(int(i))
-
         if self._motor_tau_range is not None:
             lo, hi = self._motor_tau_range
             new_taus = np.random.uniform(lo, hi, size=len(env_ids))
@@ -344,15 +361,22 @@ class DomainRandomizationWrapper:
             self._current_tau_invs[env_ids] = new_tau_invs
             self._impl.setEnvMotorTauInvs(self._current_tau_invs)
 
-        if self._goal_pos_range is not None:
-            x_range = self._goal_pos_range.get("x", [0.0, 0.0])
-            y_range = self._goal_pos_range.get("y", [0.0, 0.0])
-            z_range = self._goal_pos_range.get("z", [3.0, 7.0])
-            for i in env_ids:
-                self._current_goals[i, 0] = np.random.uniform(x_range[0], x_range[1])
-                self._current_goals[i, 1] = np.random.uniform(y_range[0], y_range[1])
-                self._current_goals[i, 2] = np.random.uniform(z_range[0], z_range[1])
-            self._impl.setEnvGoalPositions(self._current_goals)
+    def _randomize_envs(self, env_ids=None):
+        if env_ids is None:
+            env_ids = np.arange(self._num_envs)
+        if len(env_ids) == 0:
+            return
+        self._randomize_dynamics(env_ids)
+        self._randomize_goal(env_ids)
+
+    def _refresh_obs(self, obs, env_ids):
+        """Re-read C++ obs for env_ids so pos_err reflects the new goal."""
+        if len(env_ids) == 0:
+            return
+        fresh = np.zeros((self._num_envs, self._obs_dim), dtype=np.float32)
+        self._impl.getObs(fresh)
+        for i in env_ids:
+            obs[i, :self._obs_dim] = fresh[i]
 
     def reset(self, **kwargs):
         self._randomize_envs()
@@ -365,7 +389,23 @@ class DomainRandomizationWrapper:
         obs, rewards, dones, infos = self.venv.step_wait()
         done_ids = np.where(dones)[0]
         if len(done_ids) > 0:
-            self._randomize_envs(done_ids)
+            truncated = np.array([
+                infos[i].get("TimeLimit.truncated", False) for i in done_ids
+            ])
+            crash_ids = done_ids[~truncated]
+            trunc_ids = done_ids[truncated]
+
+            # Crashes / OOB: randomize everything (C++ already auto-reset)
+            if len(crash_ids) > 0:
+                self._randomize_dynamics(crash_ids)
+                self._randomize_goal(crash_ids)
+
+            # Truncation: only re-randomize goal (drone keeps flying)
+            if len(trunc_ids) > 0:
+                self._randomize_goal(trunc_ids)
+
+            # Refresh obs so pos_err uses the new goal immediately
+            self._refresh_obs(obs, done_ids)
         return obs, rewards, dones, infos
 
     def step(self, actions):

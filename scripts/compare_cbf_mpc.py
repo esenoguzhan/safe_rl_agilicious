@@ -38,9 +38,8 @@ if _REPO_ROOT not in sys.path:
 from scripts.config_loader import load_config, prepare_env_run_dir, get_vec_env_config_string
 from scripts.context import flightmare_context
 from scripts.custom_reward_wrapper import CustomRewardWrapper
-from scripts.env_wrapper import FlightlibVecEnv, ActionHistoryWrapper
+from scripts.env_wrapper import FlightlibVecEnv, ActionHistoryWrapper, ObservationNoiseWrapper
 from scripts.cbf_filter import CBFFilter
-from scripts.cbf_acados_filter import AcadosCBFFilter
 from scripts.quadrotor_model import POS, ATT, VEL, OME, QuadrotorModel, STATE_DIM
 from scripts.mpc_controller import MPCController
 
@@ -99,21 +98,9 @@ def _build_env_cfg(ccfg, base_env_cfg_path=None):
         k: v for k, v in spawn.items() if k != "motor_init"
     }
 
-    # Derive a generous world_box from barriers so the sim doesn't clip prematurely.
-    # The barriers themselves enforce the safe region; the world_box just prevents
-    # the sim from exploding far outside.
-    barriers = ccfg.get("position_barriers", [])
-    bnd = _barriers_to_axis_bounds(barriers)
-    if bnd:
-        x_lo = bnd.get("x", (-20, 20))[0] or -20
-        x_hi = bnd.get("x", (-20, 20))[1] or 20
-        y_lo = bnd.get("y", (-20, 20))[0] or -20
-        y_hi = bnd.get("y", (-20, 20))[1] or 20
-        z_lo = bnd.get("z", (0, 20))[0] or 0
-        z_hi = bnd.get("z", (0, 20))[1] or 20
-        pad = 10.0
-        env["world_box"] = [x_lo - pad, x_hi + pad, y_lo - pad, y_hi + pad,
-                            max(z_lo - pad, 0), z_hi + pad]
+    world_box = ccfg.get("world_box")
+    if world_box is not None:
+        env["world_box"] = list(world_box)
 
     # Custom reward (needed so the RL policy gets the same reward signal)
     rl_cfg = ccfg.get("rl_policy", {})
@@ -277,6 +264,11 @@ def _run_cbf_episode(env, model_policy, cbf, model_quad, goal_pos, act_mean,
     obs_raw = _get_raw_obs(env, obs)
 
     state = model_quad.state_from_observation(obs_raw[:STATE_OBS_DIM], goal_pos=goal_pos)
+    print(f"  [CBF] Init: obs_raw[:13]={obs_raw[:STATE_OBS_DIM]}")
+    print(f"  [CBF] Init: goal={goal_pos}, reconstructed pos={state[POS]}, vel={state[VEL]}")
+    for bar in cbf.barriers:
+        h_val = bar.h(state[POS], state[VEL])
+        print(f"  [CBF] Init barrier {bar.name}: h={h_val:.4f}")
     positions = [state[POS].copy()]
     obs_list = [obs_raw[:STATE_OBS_DIM].copy()]
     actions = []
@@ -284,6 +276,8 @@ def _run_cbf_episode(env, model_policy, cbf, model_quad, goal_pos, act_mean,
     act_dim = env.action_space.shape[0]
 
     done, steps = False, 0
+    qp_fail_count = 0
+    barrier_violations = {b.name: 0 for b in cbf.barriers}
     while not done and steps < max_steps:
         action, _ = model_policy.predict(
             obs.reshape(1, -1) if obs.ndim == 1 else obs,
@@ -292,6 +286,20 @@ def _run_cbf_episode(env, model_policy, cbf, model_quad, goal_pos, act_mean,
         action = action.ravel()
         u_raw = action[:4].astype(np.float64) * act_std + act_mean
         u_safe = cbf.filter(state, u_raw)
+
+        if cbf.last_qp_failed:
+            qp_fail_count += 1
+            if qp_fail_count <= 5:
+                print(f"  [CBF] QP FAIL step={steps} pos={state[POS]} "
+                      f"reason={cbf.last_qp_failure_reason}")
+        for bar in cbf.barriers:
+            h_val = bar.h(state[POS], state[VEL])
+            if h_val < 0:
+                barrier_violations[bar.name] += 1
+                if barrier_violations[bar.name] <= 3:
+                    print(f"  [CBF] BARRIER VIOLATED: {bar.name} h={h_val:.4f} "
+                          f"pos={state[POS]} vel={state[VEL]}")
+
         safe_norm = np.clip(
             (u_safe.astype(np.float64) - act_mean) / (act_std + 1e-8),
             -1.0, 1.0,
@@ -313,6 +321,9 @@ def _run_cbf_episode(env, model_policy, cbf, model_quad, goal_pos, act_mean,
         steps += 1
         if infos and getattr(infos[0], "__contains__", None) and "episode" in infos[0]:
             break
+
+    print(f"  [CBF] Episode summary: steps={steps}, QP failures={qp_fail_count}/{steps}, "
+          f"barrier violations={barrier_violations}")
 
     return {
         "positions": np.array(positions),
@@ -517,13 +528,20 @@ def plot_comparison(datasets, sim_dt, barriers, goal_pos,
     datasets : list of (label, data_dict, color, linestyle)
     """
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     n_rows, n_cols = 4, 3
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 16))
-    names = " vs ".join(lbl for lbl, _, _, _ in datasets)
-    fig.suptitle(f"{names} — Episode {episode_idx}  |  "
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 20))
+    fig.suptitle(f"Episode {episode_idx}  |  "
                  f"goal={np.array2string(goal_pos, precision=1)}",
-                 fontsize=14, fontweight="bold")
+                 fontsize=14, fontweight="bold", y=0.99)
+
+    legend_handles = [Line2D([0], [0], color=c, ls=ls, lw=2, label=lbl)
+                      for lbl, _, c, ls in datasets]
+    legend_handles.append(Line2D([0], [0], color="green", marker="*", ls="None",
+                                 markersize=10, label="Goal"))
+    fig.legend(handles=legend_handles, loc="upper center", ncol=len(datasets) + 1,
+               fontsize=11, frameon=True, bbox_to_anchor=(0.5, 0.97))
 
     # Row 0: trajectory projections
     for col, (dims, title) in enumerate([
@@ -548,7 +566,6 @@ def plot_comparison(datasets, sim_dt, barriers, goal_pos,
         ax.set_xlabel(dims[0])
         ax.set_ylabel(dims[1])
         ax.set_title(title)
-        ax.legend(loc="upper right", fontsize=7)
         ax.grid(True, alpha=0.3)
         ax.axis("equal")
 
@@ -565,13 +582,6 @@ def plot_comparison(datasets, sim_dt, barriers, goal_pos,
             ax.axhline(goal_pos[i], color=c, linewidth=0.7, linestyle=":", alpha=0.5)
     ax.set_ylabel("Position (m)")
     ax.set_xlabel("Time (s)")
-    # Build compact legend showing line-style per controller
-    from matplotlib.lines import Line2D
-    pos_handles = [Line2D([0], [0], color="gray", ls=ls, lw=1.5, label=lbl)
-                   for lbl, _, _, ls in datasets]
-    pos_handles += [Line2D([0], [0], color=f"C{i}", ls="-", lw=1.5, label=c)
-                    for i, c in enumerate(["x", "y", "z"])]
-    ax.legend(handles=pos_handles, loc="upper right", fontsize=5, ncol=2)
     ax.grid(True, alpha=0.3)
     ax.set_title("Position vs time")
 
@@ -583,7 +593,6 @@ def plot_comparison(datasets, sim_dt, barriers, goal_pos,
         ax.plot(t, tilt, color=c, linewidth=1.5, linestyle=ls, label=lbl)
     ax.set_ylabel("Tilt angle (deg)")
     ax.set_xlabel("Time (s)")
-    ax.legend(loc="upper right", fontsize=7)
     ax.grid(True, alpha=0.3)
     ax.set_title("Tilt angle")
 
@@ -595,7 +604,6 @@ def plot_comparison(datasets, sim_dt, barriers, goal_pos,
         ax.plot(t, speed, color=c, linewidth=1.5, linestyle=ls, label=lbl)
     ax.set_ylabel("Speed |v| (m/s)")
     ax.set_xlabel("Time (s)")
-    ax.legend(loc="upper right", fontsize=7)
     ax.grid(True, alpha=0.3)
     ax.set_title("Linear speed")
 
@@ -608,7 +616,6 @@ def plot_comparison(datasets, sim_dt, barriers, goal_pos,
             ax.plot(t, np.sum(act, axis=1), color=c, linewidth=1, linestyle=ls, label=lbl)
     ax.set_ylabel("Total thrust (N)")
     ax.set_xlabel("Time (s)")
-    ax.legend(loc="upper right", fontsize=7)
     ax.grid(True, alpha=0.3)
     ax.set_title("Total thrust")
 
@@ -620,7 +627,6 @@ def plot_comparison(datasets, sim_dt, barriers, goal_pos,
         ax.plot(t, omega_mag, color=c, linewidth=1, linestyle=ls, label=lbl)
     ax.set_ylabel("|omega| (rad/s)")
     ax.set_xlabel("Time (s)")
-    ax.legend(loc="upper right", fontsize=7)
     ax.grid(True, alpha=0.3)
     ax.set_title("Angular velocity magnitude")
 
@@ -632,7 +638,6 @@ def plot_comparison(datasets, sim_dt, barriers, goal_pos,
             ax.plot(t, np.cumsum(rew), color=c, linewidth=1.5, linestyle=ls, label=lbl)
     ax.set_ylabel("Cumulative reward")
     ax.set_xlabel("Time (s)")
-    ax.legend(loc="upper right", fontsize=7)
     ax.grid(True, alpha=0.3)
     ax.set_title("Cumulative reward")
 
@@ -648,7 +653,6 @@ def plot_comparison(datasets, sim_dt, barriers, goal_pos,
             title_parts.append(f"{lbl}: {err[-1]:.3f}m")
         ax.set_ylabel("Position error (m)")
         ax.set_xlabel("Time (s)")
-        ax.legend(loc="upper right", fontsize=7)
         ax.set_title("Final err — " + ", ".join(title_parts))
     ax.grid(True, alpha=0.3)
 
@@ -661,7 +665,6 @@ def plot_comparison(datasets, sim_dt, barriers, goal_pos,
             ax.plot(t, total, linewidth=1, color=c, linestyle=ls, label=lbl)
     ax.set_ylabel("Total thrust (N)")
     ax.set_xlabel("Time (s)")
-    ax.legend(loc="upper right", fontsize=6)
     ax.grid(True, alpha=0.3)
     ax.set_title("Total thrust (detail)")
 
@@ -677,9 +680,8 @@ def plot_comparison(datasets, sim_dt, barriers, goal_pos,
     ax3d.set_ylabel("y")
     ax3d.set_zlabel("z")
     ax3d.set_title("3D trajectory")
-    ax3d.legend(loc="upper right", fontsize=7)
 
-    plt.tight_layout()
+    plt.tight_layout(h_pad=3.0, w_pad=2.5, rect=[0, 0, 1, 0.95])
     if save_path:
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -741,6 +743,8 @@ def main():
         parser.error("--checkpoint is required (or set rl_policy.checkpoint in compare_config)")
 
     # ---- Build env config from compare_config ----
+    if args.goal is not None:
+        ccfg.setdefault("goal", {})["position"] = list(args.goal)
     cfg = _build_env_cfg(ccfg, args.env_config)
     barriers = ccfg.get("position_barriers", [])
 
@@ -756,6 +760,15 @@ def main():
 
     # Wrappers for RL policy
     rl_cfg = ccfg.get("rl_policy", {})
+
+    obs_noise_cfg = ccfg.get("observation_noise")
+    if isinstance(obs_noise_cfg, dict) and (
+        obs_noise_cfg.get("position", 0) > 0 or obs_noise_cfg.get("velocity", 0) > 0
+    ):
+        env = ObservationNoiseWrapper(env, obs_noise_cfg)
+        print(f"Observation noise: position={obs_noise_cfg.get('position', 0)}, "
+              f"velocity={obs_noise_cfg.get('velocity', 0)}")
+
     cr = rl_cfg.get("custom_reward")
     if cr is not None and cr.get("enabled", False):
         env = CustomRewardWrapper(env, cr)
@@ -822,13 +835,6 @@ def main():
 
     model_quad_mpc = QuadrotorModel()
 
-    # ---- Acados CBF filter ----
-    print("Building Acados CBF filter ...")
-    cbf_acados_kwargs = {}
-    if args.cbf_config is not None:
-        cbf_acados_kwargs["config_path"] = args.cbf_config
-    cbf_acados = AcadosCBFFilter(**cbf_acados_kwargs)
-
     # ---- Run ----
     print(f"\nScenario: {n_episodes} episodes, max_steps={max_steps}, "
           f"seed={seed}, randomize_goal={randomize_goal}")
@@ -846,7 +852,6 @@ def main():
     CTRL_META = [
         ("RL",       "C1", "-"),
         ("RL+CBF",   "C0", "-"),
-        ("RL+CBF2",  "C4", "-."),
         ("MPC",      "C3", "--"),
         ("MPC+Con",  "C2", "--"),
     ]
@@ -894,20 +899,6 @@ def main():
         cbf_err = float(np.linalg.norm(d["positions"][-1] - goal_pos))
         print(f"    steps={d['steps']}, reward={cbf_rew:.2f}, "
               f"final_err={cbf_err:.4f}m, wall={cbf_wall:.1f}s")
-
-        # ---- RL+CBF2 (acados CBF) ----
-        print("  Running RL+CBF2 (acados) ...")
-        t0 = time.perf_counter()
-        ep_data["RL+CBF2"] = _run_cbf_episode(
-            env, model_policy, cbf_acados, model_quad, goal_pos,
-            act_mean, act_std, max_steps, ep_seed, deterministic,
-        )
-        cbf2_wall = time.perf_counter() - t0
-        d = ep_data["RL+CBF2"]
-        cbf2_rew = float(np.sum(d["rewards"]))
-        cbf2_err = float(np.linalg.norm(d["positions"][-1] - goal_pos))
-        print(f"    steps={d['steps']}, reward={cbf2_rew:.2f}, "
-              f"final_err={cbf2_err:.4f}m, wall={cbf2_wall:.1f}s")
 
         # ---- MPC (free) ----
         print("  Running MPC (free) ...")

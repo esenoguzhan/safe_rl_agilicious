@@ -79,6 +79,9 @@ class CustomRewardWrapper:
         self._pending_actions = None
         self._prev_actions = None
 
+        self._crash_penalty = float(cfg.get("crash_penalty", 0.0))
+        self._max_pos_error = float(cfg.get("max_pos_error", 0.0))
+
         if self._mode == "sum_of_exp":
             self._init_sum_of_exp(cfg, obs_dim)
         else:
@@ -194,7 +197,28 @@ class CustomRewardWrapper:
             for i in range(len(dones)):
                 if dones[i] and "terminal_observation" in infos[i]:
                     reward_obs[i] = infos[i]["terminal_observation"]
+
+            # Out-of-bounds early termination: if position error exceeds
+            # max_pos_error, treat as a crash (done + penalty).
+            if self._max_pos_error > 0:
+                for i in range(len(dones)):
+                    if not dones[i]:
+                        pos_err_sq = float(np.sum(reward_obs[i, _POS_SLICE] ** 2))
+                        if pos_err_sq > self._max_pos_error ** 2:
+                            dones[i] = True
+                            infos[i]["terminal_observation"] = reward_obs[i].copy()
+                            infos[i]["oob_termination"] = True
+
             rewards = self._compute_reward(reward_obs, self._pending_actions)
+
+            # Crash penalty: any done seen here is from C++ terminal state
+            # (ground crash) or out-of-bounds, not from episode truncation
+            # (which is handled by VecMaxEpisodeSteps above this wrapper).
+            if self._crash_penalty != 0.0:
+                for i in range(len(dones)):
+                    if dones[i]:
+                        rewards[i] = self._crash_penalty
+
             prev = self._pending_actions.copy()
             if np.any(dones):
                 for i in range(len(dones)):
