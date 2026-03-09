@@ -59,6 +59,7 @@ class QuadrotorEnv final : public EnvBase {
   void setGoalPosition(Scalar x, Scalar y, Scalar z);
   void setSpawnRanges(Ref<Vector<>> ranges);
   void setWorldBox(Ref<Vector<>> box);
+  bool setQuadState(Ref<Vector<>> state);
   void initHoverMotors();
 
   // - public get functions

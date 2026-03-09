@@ -63,6 +63,7 @@ class VecEnv {
   void setSpawnRanges(Ref<Vector<>> ranges);
   void setWorldBox(Ref<Vector<>> box);
   void reinitHoverMotor(int agent_id);
+  bool setQuadState(int env_id, Ref<Vector<>> state);
   void getTerminalObs(Ref<MatrixRowMajor<>> obs);
 
   // public functions

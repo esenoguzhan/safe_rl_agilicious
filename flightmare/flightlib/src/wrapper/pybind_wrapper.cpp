@@ -38,6 +38,7 @@ PYBIND11_MODULE(flightgym, m) {
     .def("setEnvGoalPositions", &VecEnv<QuadrotorEnv>::setEnvGoalPositions)
     .def("setSpawnRanges", &VecEnv<QuadrotorEnv>::setSpawnRanges)
     .def("setWorldBox", &VecEnv<QuadrotorEnv>::setWorldBox)
+    .def("setQuadState", &VecEnv<QuadrotorEnv>::setQuadState)
     .def("getTerminalObs", &VecEnv<QuadrotorEnv>::getTerminalObs)
     .def("reinitHoverMotor", &VecEnv<QuadrotorEnv>::reinitHoverMotor)
     .def("__repr__", [](const VecEnv<QuadrotorEnv>& a) {

@@ -235,6 +235,26 @@ void QuadrotorEnv::setSpawnRanges(Ref<Vector<>> ranges) {
   spawn_ori_scale_ = ranges(18);
 }
 
+bool QuadrotorEnv::setQuadState(Ref<Vector<>> state) {
+  if (state.size() < quadenv::kNObs) return false;
+  quad_state_.setZero();
+  quad_state_.x(QS::POSX) = state(0);
+  quad_state_.x(QS::POSY) = state(1);
+  quad_state_.x(QS::POSZ) = state(2);
+  quad_state_.x(QS::ATTW) = state(3);
+  quad_state_.x(QS::ATTX) = state(4);
+  quad_state_.x(QS::ATTY) = state(5);
+  quad_state_.x(QS::ATTZ) = state(6);
+  quad_state_.qx /= quad_state_.qx.norm();
+  quad_state_.x(QS::VELX) = state(7);
+  quad_state_.x(QS::VELY) = state(8);
+  quad_state_.x(QS::VELZ) = state(9);
+  quad_state_.x(QS::OMEX) = state(10);
+  quad_state_.x(QS::OMEY) = state(11);
+  quad_state_.x(QS::OMEZ) = state(12);
+  return quadrotor_ptr_->setState(quad_state_);
+}
+
 bool QuadrotorEnv::setMass(Scalar mass) {
   QuadrotorDynamics dyn;
   quadrotor_ptr_->getDynamics(&dyn);

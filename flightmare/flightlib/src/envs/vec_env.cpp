@@ -255,6 +255,12 @@ void VecEnv<EnvBase>::curriculumUpdate(void) {
 }
 
 template<typename EnvBase>
+bool VecEnv<EnvBase>::setQuadState(int env_id, Ref<Vector<>> state) {
+  if (env_id < 0 || env_id >= num_envs_) return false;
+  return envs_[env_id]->setQuadState(state);
+}
+
+template<typename EnvBase>
 void VecEnv<EnvBase>::getTerminalObs(Ref<MatrixRowMajor<>> obs) {
   obs = terminal_obs_;
 }
