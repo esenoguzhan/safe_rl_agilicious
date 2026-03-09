@@ -35,7 +35,7 @@ _REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from scripts.config_loader import load_config, prepare_env_run_dir, get_vec_env_config_string
+from scripts.config_loader import load_config, prepare_env_run_dir, get_vec_env_config_string, write_env_configs
 from scripts.context import flightmare_context
 from scripts.custom_reward_wrapper import CustomRewardWrapper
 from scripts.env_wrapper import FlightlibVecEnv, ActionHistoryWrapper, ObservationNoiseWrapper
@@ -83,6 +83,7 @@ def _build_env_cfg(ccfg, base_env_cfg_path=None):
 
     env.setdefault("quadrotor_env", {})
     env["quadrotor_env"]["sim_dt"] = scenario.get("sim_dt", 0.02)
+    env["quadrotor_env"]["max_t"] = scenario.get("max_episode_steps", 500) * scenario.get("sim_dt", 0.02)
 
     if quad:
         env["quadrotor_dynamics"] = quad
@@ -188,12 +189,12 @@ def _pack_spawn_ranges(spawn_cfg):
 def _make_env(cfg):
     QuadrotorEnv_v1 = _get_QuadrotorEnv_v1()
     run_dir = prepare_env_run_dir(cfg)
-    if run_dir:
-        with flightmare_context(run_dir):
-            impl = QuadrotorEnv_v1()
-    else:
-        vec_config_str = get_vec_env_config_string(cfg)
-        impl = QuadrotorEnv_v1(vec_config_str, False)
+    if not run_dir:
+        import tempfile
+        run_dir = tempfile.mkdtemp(prefix="compare_env_")
+        write_env_configs(cfg, run_dir)
+    with flightmare_context(run_dir):
+        impl = QuadrotorEnv_v1()
     motor_init = cfg.get("env", {}).get("motor_init", "zero")
     mode = _MOTOR_INIT_MODES.get(motor_init, 0)
     impl.setMotorInitMode(mode)

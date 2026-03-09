@@ -11,6 +11,9 @@ Three reward modes (set via YAML `env.custom_reward.mode`):
     Same dist as weighted_exp, but:  rew = 1 / (1 + dist)
     Always positive [0,1], bounded, coupled, and gradient never vanishes.
 
+Optional L1 position penalty (all modes): rew -= l1_pos_penalty * ||pos_err||.
+Provides constant gradient toward zero error at all distances. Set l1_pos_penalty > 0 to enable.
+
   "sum_of_exp":
     rew = w_pos  * exp(-k_pos  * ||pos_err||^2)  + ...  per group
     Each term provides independent gradients; total reward in [0, sum_of_weights].
@@ -81,6 +84,7 @@ class CustomRewardWrapper:
 
         self._crash_penalty = float(cfg.get("crash_penalty", 0.0))
         self._max_pos_error = float(cfg.get("max_pos_error", 0.0))
+        self._l1_pos_penalty = float(cfg.get("l1_pos_penalty", 0.0))
 
         if self._mode == "sum_of_exp":
             self._init_sum_of_exp(cfg, obs_dim)
@@ -132,6 +136,9 @@ class CustomRewardWrapper:
         rew = -dist
         if self._rew_exponential:
             rew = np.exp(rew)
+        if self._l1_pos_penalty > 0:
+            pos_err = obs[:, _POS_SLICE] - self._x_goal[_POS_SLICE]
+            rew -= self._l1_pos_penalty * np.sqrt(np.sum(pos_err * pos_err, axis=1))
         return rew.astype(np.float32)
 
     def _compute_cauchy(self, obs, actions):
@@ -144,6 +151,9 @@ class CustomRewardWrapper:
             act_delta = actions - self._prev_actions
             dist += np.sum(self._rew_act_rate_weight * act_delta * act_delta, axis=1)
         rew = 1.0 / (1.0 + self._cauchy_scale * dist)
+        if self._l1_pos_penalty > 0:
+            pos_err = obs[:, _POS_SLICE] - self._x_goal[_POS_SLICE]
+            rew -= self._l1_pos_penalty * np.sqrt(np.sum(pos_err * pos_err, axis=1))
         return rew.astype(np.float32)
 
     def _compute_sum_of_exp(self, obs, actions):
@@ -164,6 +174,9 @@ class CustomRewardWrapper:
         if self._prev_actions is not None:
             act_delta = actions - self._prev_actions
             rew -= np.sum(self._rew_act_rate_weight * act_delta * act_delta, axis=1)
+
+        if self._l1_pos_penalty > 0:
+            rew -= self._l1_pos_penalty * np.sqrt(np.sum(pos_err * pos_err, axis=1))
 
         return rew.astype(np.float32)
 

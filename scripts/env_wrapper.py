@@ -136,6 +136,12 @@ class FlightlibVecEnv:
         """SB3 expects this for EvalCallback / evaluate_policy; we use no Monitor."""
         return (False,) * self._num_envs
 
+    def setQuadState(self, state):
+        """Set exact state [pos(3), quat(4), vel(3), omega(3)] for env 0, return fresh obs."""
+        self._impl.setQuadState(0, np.asarray(state, dtype=np.float32))
+        self._impl.getObs(self._obs)
+        return self._obs.copy()
+
     def connect_unity(self):
         """Optional: connect to Unity for rendering."""
         return self._impl.connectUnity()
