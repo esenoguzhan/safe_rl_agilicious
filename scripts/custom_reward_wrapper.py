@@ -11,8 +11,8 @@ Three reward modes (set via YAML `env.custom_reward.mode`):
     Same dist as weighted_exp, but:  rew = 1 / (1 + dist)
     Always positive [0,1], bounded, coupled, and gradient never vanishes.
 
-Optional L1 position penalty (all modes): rew -= l1_pos_penalty * ||pos_err||.
-Provides constant gradient toward zero error at all distances. Set l1_pos_penalty > 0 to enable.
+Optional L1 position penalty (all modes): rew -= l1_pos_penalty * (|ex|+|ey|+|ez|).
+Provides component-wise linear gradient toward zero error. Set l1_pos_penalty > 0 to enable.
 
   "sum_of_exp":
     rew = w_pos  * exp(-k_pos  * ||pos_err||^2)  + ...  per group
@@ -50,6 +50,11 @@ def _parse_list(cfg, key, default, length):
     if arr.size != length:
         raise ValueError(f"{key} must have length {length} or 1, got {arr.size}")
     return arr.flat[:length].copy() if arr.ndim > 1 else arr
+
+
+def _l1_norm_position_error(pos_err):
+    """Per-env L1 norm of 3D position error: |ex| + |ey| + |ez|."""
+    return np.sum(np.abs(pos_err), axis=1)
 
 
 class CustomRewardWrapper:
@@ -130,6 +135,16 @@ class CustomRewardWrapper:
         dist = np.sum(self._rew_state_weight * state_error * state_error, axis=1) + np.sum(
             self._rew_act_weight * act_error * act_error, axis=1
         )
+        # Replace quaternion component L2 with sign-invariant orientation error:
+        # 1 - (q · q_goal)^2, which is identical for q and -q.
+        ori_old = np.sum(
+            self._rew_state_weight[_ORI_SLICE]
+            * state_error[:, _ORI_SLICE]
+            * state_error[:, _ORI_SLICE],
+            axis=1,
+        )
+        ori_new = np.sum(self._rew_state_weight[_ORI_SLICE]) * self._quat_ori_error(obs)
+        dist += (ori_new - ori_old)
         if self._prev_actions is not None:
             act_delta = actions - self._prev_actions
             dist += np.sum(self._rew_act_rate_weight * act_delta * act_delta, axis=1)
@@ -138,7 +153,7 @@ class CustomRewardWrapper:
             rew = np.exp(rew)
         if self._l1_pos_penalty > 0:
             pos_err = obs[:, _POS_SLICE] - self._x_goal[_POS_SLICE]
-            rew -= self._l1_pos_penalty * np.sqrt(np.sum(pos_err * pos_err, axis=1))
+            rew -= self._l1_pos_penalty * _l1_norm_position_error(pos_err)
         return rew.astype(np.float32)
 
     def _compute_cauchy(self, obs, actions):
@@ -147,25 +162,35 @@ class CustomRewardWrapper:
         dist = np.sum(self._rew_state_weight * state_error * state_error, axis=1) + np.sum(
             self._rew_act_weight * act_error * act_error, axis=1
         )
+        # Replace quaternion component L2 with sign-invariant orientation error:
+        # 1 - (q · q_goal)^2, which is identical for q and -q.
+        ori_old = np.sum(
+            self._rew_state_weight[_ORI_SLICE]
+            * state_error[:, _ORI_SLICE]
+            * state_error[:, _ORI_SLICE],
+            axis=1,
+        )
+        ori_new = np.sum(self._rew_state_weight[_ORI_SLICE]) * self._quat_ori_error(obs)
+        dist += (ori_new - ori_old)
         if self._prev_actions is not None:
             act_delta = actions - self._prev_actions
             dist += np.sum(self._rew_act_rate_weight * act_delta * act_delta, axis=1)
         rew = 1.0 / (1.0 + self._cauchy_scale * dist)
         if self._l1_pos_penalty > 0:
             pos_err = obs[:, _POS_SLICE] - self._x_goal[_POS_SLICE]
-            rew -= self._l1_pos_penalty * np.sqrt(np.sum(pos_err * pos_err, axis=1))
+            rew -= self._l1_pos_penalty * _l1_norm_position_error(pos_err)
         return rew.astype(np.float32)
 
     def _compute_sum_of_exp(self, obs, actions):
         pos_err = obs[:, _POS_SLICE] - self._x_goal[_POS_SLICE]
-        ori_err = obs[:, _ORI_SLICE] - self._x_goal[_ORI_SLICE]
         vel = obs[:, _VEL_SLICE] - self._x_goal[_VEL_SLICE]
         omega = obs[:, _OMEGA_SLICE] - self._x_goal[_OMEGA_SLICE]
         act_err = actions - self._act_goal
+        ori_err_scalar = self._quat_ori_error(obs)
 
         rew = (
             self._pos_w * np.exp(-self._pos_k * np.sum(pos_err * pos_err, axis=1))
-            + self._ori_w * np.exp(-self._ori_k * np.sum(ori_err * ori_err, axis=1))
+            + self._ori_w * np.exp(-self._ori_k * ori_err_scalar)
             + self._vel_w * np.exp(-self._vel_k * np.sum(vel * vel, axis=1))
             + self._omega_w * np.exp(-self._omega_k * np.sum(omega * omega, axis=1))
             + self._act_w * np.exp(-self._act_k * np.sum(act_err * act_err, axis=1))
@@ -176,9 +201,27 @@ class CustomRewardWrapper:
             rew -= np.sum(self._rew_act_rate_weight * act_delta * act_delta, axis=1)
 
         if self._l1_pos_penalty > 0:
-            rew -= self._l1_pos_penalty * np.sqrt(np.sum(pos_err * pos_err, axis=1))
+            rew -= self._l1_pos_penalty * _l1_norm_position_error(pos_err)
 
         return rew.astype(np.float32)
+
+    def _quat_ori_error(self, obs):
+        """Sign-invariant quaternion orientation error: 1 - (q·q_goal)^2."""
+        q = obs[:, _ORI_SLICE].astype(np.float32)
+        q_goal = self._x_goal[_ORI_SLICE].astype(np.float32)
+
+        q_norm = np.linalg.norm(q, axis=1, keepdims=True)
+        q_norm = np.clip(q_norm, 1e-8, None)
+        qn = q / q_norm
+
+        qg_norm = np.linalg.norm(q_goal)
+        if qg_norm < 1e-8:
+            qg = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        else:
+            qg = q_goal / qg_norm
+
+        dot = np.sum(qn * qg[None, :], axis=1)
+        return 1.0 - np.square(dot)
 
     @property
     def num_envs(self):
