@@ -144,29 +144,20 @@ def _build_casadi_dynamics(quad_params: dict):
 
 
 @contextlib.contextmanager
-def _suppress_stdout():
-    """Suppress acados C code generation print spam."""
-    fd = sys.stdout.fileno()
-    with os.fdopen(os.dup(fd), "w") as old:
+def _suppress_output():
+    """Suppress both stdout and stderr (acados C code prints MINSTEP etc. to both)."""
+    out_fd = sys.stdout.fileno()
+    err_fd = sys.stderr.fileno()
+    with os.fdopen(os.dup(out_fd), "w") as old_out, \
+         os.fdopen(os.dup(err_fd), "w") as old_err:
         with open(os.devnull, "w") as devnull:
-            os.dup2(devnull.fileno(), fd)
+            os.dup2(devnull.fileno(), out_fd)
+            os.dup2(devnull.fileno(), err_fd)
         try:
             yield
         finally:
-            os.dup2(old.fileno(), fd)
-
-
-@contextlib.contextmanager
-def _suppress_stderr():
-    """Suppress acados C-level prints (MINSTEP warnings etc.) on stderr."""
-    fd = sys.stderr.fileno()
-    with os.fdopen(os.dup(fd), "w") as old:
-        with open(os.devnull, "w") as devnull:
-            os.dup2(devnull.fileno(), fd)
-        try:
-            yield
-        finally:
-            os.dup2(old.fileno(), fd)
+            os.dup2(old_out.fileno(), out_fd)
+            os.dup2(old_err.fileno(), err_fd)
 
 
 class MPCController:
@@ -282,13 +273,31 @@ class MPCController:
         ocp.constraints.idxbu = np.arange(INPUT_DIM)
 
         # -- State constraints on position (indices 0,1,2) --
+        self._use_slack = bool(mpc_cfg.get("use_slack", False))
+        self._K_lin = float(mpc_cfg.get("K_lin", 1e6))
+        self._K_quad = float(mpc_cfg.get("K_quad", 0.0))
         if self._constrained:
+            n_pos = 3
             ocp.constraints.lbx = self._pos_min
             ocp.constraints.ubx = self._pos_max
             ocp.constraints.idxbx = np.array([0, 1, 2])
             ocp.constraints.lbx_e = self._pos_min
             ocp.constraints.ubx_e = self._pos_max
             ocp.constraints.idxbx_e = np.array([0, 1, 2])
+
+            if self._use_slack:
+                # Soften all 3 position state-box constraints (path stages)
+                ocp.constraints.idxsbx = np.array([0, 1, 2])
+                ocp.cost.zl = self._K_lin * np.ones(n_pos)
+                ocp.cost.zu = self._K_lin * np.ones(n_pos)
+                ocp.cost.Zl = self._K_quad * np.ones(n_pos)
+                ocp.cost.Zu = self._K_quad * np.ones(n_pos)
+                # Soften terminal stage too
+                ocp.constraints.idxsbx_e = np.array([0, 1, 2])
+                ocp.cost.zl_e = self._K_lin * np.ones(n_pos)
+                ocp.cost.zu_e = self._K_lin * np.ones(n_pos)
+                ocp.cost.Zl_e = self._K_quad * np.ones(n_pos)
+                ocp.cost.Zu_e = self._K_quad * np.ones(n_pos)
 
         # -- Initial state constraint (set at runtime) --
         ocp.constraints.x0 = np.zeros(STATE_DIM)
@@ -314,7 +323,7 @@ class MPCController:
 
         json_file = str(codegen_dir / f"acados_ocp_{model.name}.json")
 
-        with _suppress_stdout():
+        with _suppress_output():
             self._solver = AcadosOcpSolver(ocp, json_file=json_file)
 
         # Store default reference
@@ -381,7 +390,7 @@ class MPCController:
 
         import time
         t0 = time.perf_counter()
-        with _suppress_stderr():
+        with _suppress_output():
             status = self._solver.solve()
         self.last_solve_time_ms = (time.perf_counter() - t0) * 1000.0
         self.last_status = status
@@ -428,7 +437,7 @@ class MPCController:
         if warmup_iter > 0:
             self._solver.set(0, "lbx", x0)
             self._solver.set(0, "ubx", x0)
-            with _suppress_stderr():
+            with _suppress_output():
                 for _ in range(warmup_iter):
                     self._solver.solve()
 

@@ -4,7 +4,7 @@
 
 mpc:
   # Prediction horizon
-  N: 20                            # number of shooting intervals
+  N: 50                            # number of shooting intervals
   dt: 0.02                         # discretization step (match sim_dt)
 
   # Cost weights — diagonal entries of Q (state) and R (control) matrices.
@@ -22,8 +22,16 @@ mpc:
   pos_min: [-4.0, -4.0, 0.5]
   pos_max: [4.0, 4.0, 10.0]
 
+  # Slack (soft constraints): relaxes position constraints when infeasible.
+  # Matches CBF slack formulation for fair comparison.
+  # Penalty per stage: K_lin * sum(slack) + K_quad * sum(slack^2)
+  # NOTE: MPC has N=50 stages so use moderate values to avoid ill-conditioning.
+  use_slack: true
+  K_lin: 1000.0
+  K_quad: 100.0
+
   # Solver settings (acados)
-  max_iter: 5                     # SQP iterations per solve (RTI: 1, full SQP: up to max_iter)
+  max_iter: 100                     # SQP iterations per solve (RTI: 1, full SQP: up to max_iter)
   qp_solver: PARTIAL_CONDENSING_HPIPM
   nlp_solver: SQP                 # SQP (full) for robustness; SQP_RTI for speed
   integrator: ERK                 # ERK (explicit RK) or IRK (implicit RK)

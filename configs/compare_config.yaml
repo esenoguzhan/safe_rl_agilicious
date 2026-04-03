@@ -9,7 +9,7 @@
 scenario:
   episodes: 5
   max_episode_steps: 1000
-  seed: 0
+  seed: 7777
   sim_dt: 0.02              # must match flightlib sim_dt
 
 # ---------------------------------------------------------------------------
@@ -27,17 +27,32 @@ goal:
 # spawn — initial state randomization
 # ---------------------------------------------------------------------------
 spawn:
-  motor_init: zero             # "zero" (motors off) or "hover" (at hover rpm)
-  pos_x: [-2.0, 2.0]
-  pos_y: [-2.0, 2.0]
-  pos_z: [1.0, 2.0]
-  vel_x: [0.0, 0.0]
-  vel_y: [0.0, 0.0]
-  vel_z: [0.0, 0.0]
-  ang_vel_x: [0.0, 0.0]
-  ang_vel_y: [0.0, 0.0]
-  ang_vel_z: [0.0, 0.0]
-  ori_scale: 1.0               # 0 = upright, 1 = full random orientation
+  motor_init: zero            # "hover" (at hover rpm) — matches RL training regime
+  pos_x: [-6.0, 6.0]
+  pos_y: [-6.0, 6.0]
+  pos_z: [1.0, 6.0]
+  vel_x: [-8.0, 8.0]
+  vel_y: [-8.0, 8.0]
+  vel_z: [-8.0, 8.0]
+  ang_vel_x: [-5.0, 5.0]
+  ang_vel_y: [-5.0, 5.0]
+  ang_vel_z: [-5.0, 5.0]
+  ori_scale: 1.0               # mild tilt; 1.0 = full random is too aggressive for CBF
+
+# ---------------------------------------------------------------------------
+# world_box — Flightmare simulation boundary [x_lo, x_hi, y_lo, y_hi, z_lo, z_hi].
+# Episode terminates if the drone leaves this box (C++ side).
+# Set large enough that CBF/MPC constraints are the binding limit, not the sim box.
+# ---------------------------------------------------------------------------
+world_box: [-30.0, 30.0, -30.0, 30.0, 0.0, 30.0]
+
+# ---------------------------------------------------------------------------
+# observation_noise — Gaussian noise on position & velocity observations.
+# Matches training pipeline (ObservationNoiseWrapper). Set both to 0 to disable.
+# ---------------------------------------------------------------------------
+observation_noise:
+  position: 0.01    # std on obs[0:3] (position error), training used 0.01
+  velocity: 0.05    # std on obs[7:10] (linear velocity), training used 0.05
 
 # ---------------------------------------------------------------------------
 # position_barriers — safe-region half-planes (same format as cbf_config).
@@ -51,23 +66,23 @@ position_barriers:
     kv: 0.5
   - name: ceiling
     n: [0.0, 0.0, -1.0]
-    q: 4.0
+    q: 8.0
     kv: 0.5
   - name: x_min
     n: [1.0, 0.0, 0.0]
-    q: 4.0
+    q: 8.0
     kv: 0.5
   - name: x_max
     n: [-1.0, 0.0, 0.0]
-    q: 4.0
+    q: 8.0
     kv: 0.5
   - name: y_min
     n: [0.0, 1.0, 0.0]
-    q: 4.0
+    q: 8.0
     kv: 0.5
   - name: y_max
     n: [0.0, -1.0, 0.0]
-    q: 4.0
+    q: 8.0
     kv: 0.5
 
 # ---------------------------------------------------------------------------
@@ -94,12 +109,21 @@ rl_policy:
   custom_reward:
     enabled: true
     mode: cauchy
+    cauchy_scale: 0.1
     x_goal: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     act_goal: [0.0, 0.0, 0.0, 0.0]
-    rew_act_rate_weight: [0.005, 0.005, 0.005, 0.005]
-    cauchy_scale: 0.1
-    rew_state_weight: [2.0, 2.0, 3.0, 0.2, 0.2, 0.2, 0.2, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
-    rew_act_weight: [0.001, 0.001, 0.001, 0.001]
+    # Agile-Damped: [Pos(3), Quat(4), LinVel(3), AngVel(3)]
+    rew_state_weight: [
+      3.0, 3.0, 4.0,
+      0.25, 0.25, 0.25, 0.25,
+      0.15, 0.15, 0.15,
+      0.05, 0.05, 0.05,
+    ]
+    rew_act_weight: [0.002, 0.002, 0.002, 0.002]
+    rew_act_rate_weight: [0.01, 0.01, 0.01, 0.01]
+    crash_penalty: -15.0
+    max_pos_error: 25.0
+    l1_pos_penalty: 0.0
 
 # ---------------------------------------------------------------------------
 # plotting

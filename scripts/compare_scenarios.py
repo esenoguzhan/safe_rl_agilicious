@@ -21,6 +21,7 @@ import glob
 import os
 import sys
 import time
+from datetime import datetime
 
 import numpy as np
 import yaml
@@ -320,7 +321,7 @@ def _run_cbf_scenario(env, base_env, model_policy, cbf, model_quad, goal_pos,
 
     return {"positions": np.array(positions), "obs": np.array(obs_list),
             "actions": np.array(actions), "rewards": np.array(rewards),
-            "steps": steps}
+            "steps": steps, "qp_failures": int(qp_fail)}
 
 
 def _run_mpc_scenario(env, base_env, mpc, model_quad, goal_pos,
@@ -333,12 +334,13 @@ def _run_mpc_scenario(env, base_env, mpc, model_quad, goal_pos,
 
     positions = [state[POS].copy()]
     obs_list = [raw_obs[:STATE_OBS_DIM].copy()]
-    actions, rewards, solve_times = [], [], []
+    actions, rewards, solve_times, solver_statuses = [], [], [], []
 
     done, steps = False, 0
     while not done and steps < max_steps:
         u_mpc = mpc.solve(state, goal_pos)
         solve_times.append(mpc.last_solve_time_ms)
+        solver_statuses.append(int(mpc.last_status))
 
         u_norm = np.clip(
             (u_mpc - act_mean) / (act_std + 1e-8), -1.0, 1.0).astype(np.float32)
@@ -357,7 +359,8 @@ def _run_mpc_scenario(env, base_env, mpc, model_quad, goal_pos,
 
     return {"positions": np.array(positions), "obs": np.array(obs_list),
             "actions": np.array(actions), "rewards": np.array(rewards),
-            "steps": steps, "solve_times": np.array(solve_times)}
+            "steps": steps, "solve_times": np.array(solve_times),
+            "solver_statuses": np.array(solver_statuses, dtype=np.int32)}
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +606,7 @@ def main():
     plot_cfg = scfg.get("plotting", {})
     save_plots = args.save_plots or plot_cfg.get("save_plots", False)
     plot_dir = args.plot_dir or plot_cfg.get("plot_dir", "scenario_plots")
+    log_dir = plot_dir
     rl_cfg = scfg.get("rl_policy", {})
     act_hist_len = rl_cfg.get("action_history_len", 0)
     deterministic = rl_cfg.get("deterministic", True)
@@ -699,10 +703,13 @@ def main():
 
     if save_plots:
         os.makedirs(plot_dir, exist_ok=True)
+    else:
+        os.makedirs(log_dir, exist_ok=True)
 
     # ---- Run scenarios ----
     col_w = 16
     summary_rows = []
+    scenario_details = []
 
     for si, scenario in enumerate(scenarios):
         name = scenario.get("name", f"Scenario {si}")
@@ -749,12 +756,32 @@ def main():
                   f"final_err={final_err:.4f}m, wall={wall:.1f}s")
 
         row = {"name": name}
+        detail = {"name": name, "controllers": {}}
         for ctrl in controllers:
             d = ep_data[ctrl]
             row[f"{ctrl}_err"] = float(np.linalg.norm(d["positions"][-1] - goal_pos))
             row[f"{ctrl}_rew"] = float(np.sum(d["rewards"]))
             row[f"{ctrl}_steps"] = d["steps"]
+            cinfo = {
+                "final_err": row[f"{ctrl}_err"],
+                "total_reward": row[f"{ctrl}_rew"],
+                "steps": int(d["steps"]),
+            }
+            if ctrl == "RL+CBF":
+                cinfo["qp_failures"] = int(d.get("qp_failures", 0))
+            if ctrl.startswith("MPC"):
+                st = np.asarray(d.get("solve_times", []), dtype=np.float64)
+                ss = np.asarray(d.get("solver_statuses", []), dtype=np.int32)
+                if st.size > 0:
+                    cinfo["solve_ms_mean"] = float(np.mean(st))
+                    cinfo["solve_ms_max"] = float(np.max(st))
+                    cinfo["solve_ms_min"] = float(np.min(st))
+                if ss.size > 0:
+                    cinfo["solver_nonzero_status_count"] = int(np.sum(ss != 0))
+                    cinfo["solver_last_status"] = int(ss[-1])
+            detail["controllers"][ctrl] = cinfo
         summary_rows.append(row)
+        scenario_details.append(detail)
 
         save_path = os.path.join(
             plot_dir, f"scenario_{si}.png") if save_plots else None
@@ -786,6 +813,59 @@ def main():
     print(f"  Controllers: {controllers}")
     print(f"  max_steps: {max_steps}, sim_dt: {sim_dt}")
     print(f"{'='*W}")
+
+    # ---- Save textual run log (errors/solve-time/status) ----
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(log_dir, f"compare_scenarios_log_{ts}.txt")
+    with open(log_path, "w") as f:
+        f.write("Scenario comparison run log\n")
+        f.write(f"timestamp: {datetime.now().isoformat(timespec='seconds')}\n")
+        f.write(f"scenarios_config: {args.scenarios_config}\n")
+        f.write(f"checkpoint: {args.checkpoint}\n")
+        f.write(f"cbf_config: {args.cbf_config}\n")
+        f.write(f"mpc_config: {args.mpc_config}\n")
+        f.write(f"goal: {goal_pos}\n")
+        f.write(f"controllers: {controllers}\n")
+        f.write(f"max_steps: {max_steps}, sim_dt: {sim_dt}\n\n")
+
+        for row in summary_rows:
+            f.write(f"Scenario: {row['name']}\n")
+            for c in controllers:
+                err = row.get(f"{c}_err", float("nan"))
+                rew = row.get(f"{c}_rew", float("nan"))
+                steps = row.get(f"{c}_steps", 0)
+                f.write(f"  {c}: err={err:.4f}m, reward={rew:.3f}, steps={steps}\n")
+            f.write("\n")
+
+        f.write("Per-controller detailed runtime stats\n")
+        f.write("-" * 60 + "\n")
+        for si, detail in enumerate(scenario_details):
+            f.write(f"Scenario {si}: {detail['name']}\n")
+            for c in controllers:
+                cinfo = detail["controllers"].get(c, {})
+                line = (
+                    f"  {c}: final_err={cinfo.get('final_err', float('nan')):.4f}m, "
+                    f"total_reward={cinfo.get('total_reward', float('nan')):.3f}, "
+                    f"steps={cinfo.get('steps', 0)}"
+                )
+                if "qp_failures" in cinfo:
+                    line += f", qp_failures={cinfo['qp_failures']}"
+                if "solve_ms_mean" in cinfo:
+                    line += (
+                        f", solve_ms(mean/min/max)="
+                        f"{cinfo['solve_ms_mean']:.3f}/"
+                        f"{cinfo['solve_ms_min']:.3f}/"
+                        f"{cinfo['solve_ms_max']:.3f}"
+                    )
+                if "solver_nonzero_status_count" in cinfo:
+                    line += (
+                        f", nonzero_solver_status={cinfo['solver_nonzero_status_count']}, "
+                        f"last_status={cinfo.get('solver_last_status', 0)}"
+                    )
+                f.write(line + "\n")
+            f.write("\n")
+
+    print(f"Saved run log to: {log_path}")
 
 
 if __name__ == "__main__":

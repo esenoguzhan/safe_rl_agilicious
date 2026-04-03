@@ -1,27 +1,33 @@
-# Deterministic scenario comparison config.
-# Each scenario fully specifies the 13-dim initial state:
+# Scenario comparison for training setup in configs/single_stage_no_curriculum_cauchy.yaml
+# (Cauchy reward, same dynamics / action_history / reward weights as that env.)
+#
+#   python scripts/compare_scenarios.py \
+#     --scenarios_config configs/scenarios_config.yaml \
+#     --checkpoint models/single_stage_cauchy/ppo_drone_final
+#
+# Each scenario fixes the 13-dim initial state:
 #   position(3), quaternion(4) [w,x,y,z], velocity(3), angular_velocity(3)
-# Used by scripts/compare_scenarios.py
 
 # ---------------------------------------------------------------------------
 # shared parameters
 # ---------------------------------------------------------------------------
-goal: [0.0, 0.0, 5.0]
-motor_init: hover          # "hover" or "zero"
+goal: [0.0, 0.0, 10.0]
+motor_init: zero          # "hover" or "zero"
 max_episode_steps: 1000
 sim_dt: 0.02
 
 # ---------------------------------------------------------------------------
-# world_box — Flightmare simulation boundary
+# world_box — same as single_stage_no_curriculum_cauchy.yaml
 # ---------------------------------------------------------------------------
 world_box: [-30.0, 30.0, -30.0, 30.0, 0.0, 30.0]
 
 # ---------------------------------------------------------------------------
-# observation_noise — set both to 0 to disable
+# observation_noise — matches env.observation_noise in Cauchy single-stage yaml
+# (ObservationNoiseWrapper uses a fixed RNG seed for repeatable rolls.)
 # ---------------------------------------------------------------------------
 observation_noise:
-  position: 0.0
-  velocity: 0.0
+  position: 0.015
+  velocity: 0.08
 
 # ---------------------------------------------------------------------------
 # quadrotor — physical parameters (shared by all controllers)
@@ -76,16 +82,21 @@ rl_policy:
   custom_reward:
     enabled: true
     mode: cauchy
-    cauchy_scale: 0.3
+    cauchy_scale: 0.05
     x_goal: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     act_goal: [0.0, 0.0, 0.0, 0.0]
-    # Rebalanced: pos dominant, ori low (tilting is cheap), vel/ang_vel 15x/10x increase
-    rew_state_weight: [2.0, 2.0, 3.0,  0.1, 0.1, 0.1, 0.1,  0.1, 0.1, 0.1,  0.1, 0.1, 0.1]
-    rew_act_weight: [0.001, 0.001, 0.001, 0.001]
-    rew_act_rate_weight: [0.01, 0.01, 0.01, 0.01]
+    # Pos(3), Quat(4), LinVel(3), AngVel(3) — same as single_stage_no_curriculum_cauchy.yaml
+    rew_state_weight: [
+      1.0, 1.0, 1.5,
+      0.2, 0.2, 0.2, 0.2,
+      0.1, 0.1, 0.1,
+      0.05, 0.05, 0.05,
+    ]
+    rew_act_weight: [0.002, 0.002, 0.002, 0.002]
+    rew_act_rate_weight: [0.05, 0.05, 0.05, 0.05]
     l1_pos_penalty: 0.02
-    crash_penalty: -5.0
-    max_pos_error: 25.0
+    crash_penalty: -20.0
+    max_pos_error: 20.0
 
 # ---------------------------------------------------------------------------
 # plotting
@@ -95,8 +106,7 @@ plotting:
   plot_dir: scenario_plots
 
 # ---------------------------------------------------------------------------
-# scenarios — deterministic test cases
-# Add/remove entries freely; each one runs automatically.
+# scenarios — deterministic test cases (initial state only; goal from `goal` above)
 # ---------------------------------------------------------------------------
 scenarios:
   - name: "Hover (0 deg, 0 vel)"
@@ -105,10 +115,10 @@ scenarios:
     velocity: [0.0, 0.0, 0.0]
     angular_velocity: [0.0, 0.0, 0.0]
 
-  - name: "Upright aggressive (0 deg, 8 vel, 5 omega)"
+  - name: "Upright aggressive (0 deg, 4 vel, 5 omega)"
     position: [0.0, 0.0, 3.0]
     quaternion: [1.0, 0.0, 0.0, 0.0]
-    velocity: [5.66, 5.66, 0.0]               # |v| ~ 8
+    velocity: [4.0, 4.0, 0.0]                 # per-axis max |v| = 4 (spawn range)
     angular_velocity: [2.89, 2.89, 2.89]       # |w| ~ 5
 
   - name: "45-deg tilt (0 vel)"
@@ -117,10 +127,10 @@ scenarios:
     velocity: [0.0, 0.0, 0.0]
     angular_velocity: [0.0, 0.0, 0.0]
 
-  - name: "45-deg tilt aggressive (8 vel, 5 omega)"
+  - name: "45-deg tilt aggressive (4 vel, 5 omega)"
     position: [0.0, 0.0, 3.0]
     quaternion: [0.9239, 0.3827, 0.0, 0.0]
-    velocity: [5.66, 5.66, 0.0]
+    velocity: [4.0, 4.0, 0.0]
     angular_velocity: [2.89, 2.89, 2.89]
 
   - name: "Upside-down (0 vel)"
@@ -129,8 +139,8 @@ scenarios:
     velocity: [0.0, 0.0, 0.0]
     angular_velocity: [0.0, 0.0, 0.0]
 
-  - name: "Upside-down aggressive (8 vel, 5 omega)"
+  - name: "Upside-down aggressive (4 vel, 5 omega)"
     position: [0.0, 0.0, 3.0]
     quaternion: [0.0, 1.0, 0.0, 0.0]
-    velocity: [5.66, 5.66, 0.0]
+    velocity: [4.0, 4.0, 0.0]
     angular_velocity: [2.89, 2.89, 2.89]

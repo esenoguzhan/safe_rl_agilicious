@@ -1,15 +1,15 @@
 """
 CBF (Control Barrier Function) safety filter for quadrotor.
-Velocity-aware barriers: h(p, v) = n'p + q + kv*(n'v) >= 0 (half-spaces with approach-speed penalty).
-Formulation: u = u_RL + u_CBF, minimize ||u_CBF||^2 s.t. barrier conditions and actuator limits.
+Implements Cheng et al. "End-to-End Safe RL through Barrier Functions" (AAAI 2019).
 
-Two modes (config: discrete_cbf):
-- Continuous-time: L_f h + L_g h u >= -alpha*h (Cheng et al.).
-- Discrete CBF (paper-style): h_{k+1} >= (1-gamma)*h_k with sigma/gamma shaping
-  (sigma = 1/(1+exp(sigma_param*h)), gamma = gamma_max - (gamma_max - gamma_min)*sigma).
+Velocity-aware barriers: h(p, v) = n'p + q + kv*(n'v) >= 0.
 
-QP solver: acados (HPIPM, recommended), osqp, or scipy. For acados, casadi and acados_template
-are required; build/codegen is cached per number of barriers.
+Discrete CBF (paper Eq 8/14): h_{t+1} >= (1-eta)*h_t - epsilon
+  min ||u_CBF||^2 + K*epsilon  s.t. barrier + actuator constraints.
+  eta in [0,1]: 0 = Lyapunov (barrier never decreases), 1 = just stay safe.
+Also supports continuous-time: L_f h + L_g h u >= -alpha*h.
+
+QP solver: acados (NONLINEAR_LS + GAUSS_NEWTON, same as MPC), osqp, or scipy.
 """
 from pathlib import Path
 import contextlib
@@ -35,6 +35,23 @@ def _suppress_stderr():
             yield
         finally:
             os.dup2(old_stderr.fileno(), fd)
+
+
+@contextlib.contextmanager
+def _suppress_output():
+    """Suppress both stdout and stderr (acados C code prints to both)."""
+    out_fd = sys.stdout.fileno()
+    err_fd = sys.stderr.fileno()
+    with os.fdopen(os.dup(out_fd), "w") as old_out, \
+         os.fdopen(os.dup(err_fd), "w") as old_err:
+        with open(os.devnull, "w") as devnull:
+            os.dup2(devnull.fileno(), out_fd)
+            os.dup2(devnull.fileno(), err_fd)
+        try:
+            yield
+        finally:
+            os.dup2(old_out.fileno(), out_fd)
+            os.dup2(old_err.fileno(), err_fd)
 _REPO_ROOT = _SCRIPT_DIR.parent
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -220,18 +237,15 @@ def compute_discrete_cbf_inequality_from_model_step(
     u_rl: np.ndarray,
     dt: float,
     barrier: "HOCBFBarrier",
-    gamma_min: float,
-    gamma_max: float,
-    sigma_param: float,
+    eta: float,
     integrate: str = "euler",
 ) -> Tuple[np.ndarray, float]:
     """
-    Discrete CBF h_{k+1} >= (1 - gamma)*h_k using the quadrotor model's exact
-    discrete dynamics (model.step). Linearizes the constraint in u at u_rl for the QP.
+    Discrete CBF (Cheng et al. Eq 8): h_{t+1} >= (1-eta)*h_t.
+    Uses the quadrotor model's exact discrete dynamics (model.step) and
+    linearizes the constraint in u around u_rl for the QP.
 
-    For velocity-aware barrier h(p,v) = n'p + q + kv*(n'v):
-    h_next(u) ≈ h_next_nom + (n'·dp_next/du + kv·n'·dv_next/du)·(u - u_rl).
-    Require h_next >= (1-γ)*h_k => L·u_CBF >= (1-γ)*h_k - h_next_nom.
+    h_next(u) ≈ h_next_nom + L·(u - u_rl)  →  L·u_CBF >= (1-eta)*h_k - h_next_nom
 
     Returns (A_row, b_scalar) for QP: A_row @ u_CBF <= b_scalar.
     """
@@ -248,9 +262,7 @@ def compute_discrete_cbf_inequality_from_model_step(
         model, x, u_rl, dt, integrate=integrate
     )
     L = np.dot(n, dp_next_du).ravel() + kv * np.dot(n, dv_next_du).ravel()
-    sigma = 1.0 / (1.0 + np.exp(sigma_param * h_k))
-    gamma = gamma_max - (gamma_max - gamma_min) * sigma
-    rhs = (1.0 - gamma) * h_k - h_next_nom
+    rhs = (1.0 - eta) * h_k - h_next_nom
     A_row = -np.asarray(L, dtype=np.float64)
     b_scalar = -float(rhs)
     return A_row, b_scalar
@@ -262,37 +274,25 @@ def compute_discrete_cbf_inequality(
     barrier: "HOCBFBarrier",
     u_rl: np.ndarray,
     dt: float,
-    gamma_min: float,
-    gamma_max: float,
-    sigma_param: float,
+    eta: float,
 ) -> Tuple[np.ndarray, float]:
     """
-    Discrete CBF (paper-style): h_{k+1} >= (1 - gamma)*h_k.
-    Linearized: h_k1 = h_k + L_f_h*dt + 0.5*dt^2*n'g + 0.5*dt^2*dot(L_g_h, u).
-    So 0.5*dt^2*dot(L_g_h,u_safe) >= rhs_disc => L_g_h·u_safe >= rhs_disc/(0.5*dt^2).
-    sigma = 1/(1+exp(sigma_param*h)), gamma = gamma_max - (gamma_max - gamma_min)*sigma.
-    Returns (A_row, b_scalar) for one constraint L_g_h u_CBF >= rhs => -L_g_h u_CBF <= -rhs,
-    i.e. A_row = -L_g_h, b_scalar = -(rhs_for_Lg_u - L_g_h u_rl) with rhs_for_Lg_u = rhs_disc/(0.5*dt^2).
+    Discrete CBF (Cheng et al. Eq 8) via Lie-derivative linearization:
+      h_{t+1} ≈ h_t + L_f_h*dt + 0.5*dt^2*n'g + 0.5*dt^2*L_g_h*u_safe
+    Require h_{t+1} >= (1-eta)*h_t:
+      0.5*dt^2*L_g_h*u_cbf >= (1-eta)*h_t - h_t - L_f_h*dt - 0.5*dt^2*n'g - 0.5*dt^2*L_g_h*u_rl
+    Returns (A_row, b_scalar) for QP: A_row @ u_CBF <= b_scalar.
     """
     x = np.asarray(x, dtype=np.float64).ravel()[:STATE_DIM]
     n = barrier.n
     h_k = barrier.h(x[POS], x[VEL])
     L_f_h, L_g_h = compute_hocbf_derivatives(model, x, barrier)
-    # n'g (gravity in world frame)
     g_vec = np.array([0.0, 0.0, model.gravity], dtype=np.float64)
     n_dot_g = float(np.dot(n, g_vec))
-    # sigma and gamma
-    sigma = 1.0 / (1.0 + np.exp(sigma_param * h_k))
-    gamma = gamma_max - (gamma_max - gamma_min) * sigma
-    # rhs for h_k1 >= (1-gamma)*h_k: 0.5*dt^2*dot(L_g_h,u) >= (1-gamma)*h_k - h_k - L_f_h*dt - 0.5*dt^2*n'g
-    # = -gamma*h_k - L_f_h*dt - 0.5*dt^2*n'g
-    rhs_disc = (1.0 - gamma) * h_k - h_k - L_f_h * dt - 0.5 * (dt ** 2) * n_dot_g
-    # So L_g_h·u_safe >= rhs_disc / (0.5*dt^2) (correct scaling for the control term).
+    rhs_disc = (1.0 - eta) * h_k - h_k - L_f_h * dt - 0.5 * (dt ** 2) * n_dot_g
     scale = 0.5 * (dt ** 2)
     rhs_for_Lg_u = rhs_disc / scale
-    # L_g_h u_safe >= rhs_for_Lg_u  =>  L_g_h u_CBF >= rhs_for_Lg_u - L_g_h u_rl
     rhs_cbf = rhs_for_Lg_u - float(np.dot(L_g_h, u_rl))
-    # QP: -L_g_h u_CBF <= -rhs_cbf
     A_row = -np.asarray(L_g_h, dtype=np.float64)
     b_scalar = -rhs_cbf
     return A_row, b_scalar
@@ -404,47 +404,75 @@ def _build_acados_cbf_solver(nh: int):
     np_param = nh * 4 + nh  # A_ineq flat (nh*4) + b_ineq (nh)
     u = cs.SX.sym("u", nu)
     p = cs.SX.sym("p", np_param)
-    A_flat = p[: nh * 4]
-    b_vec = p[nh * 4 :]
-    A_ineq = cs.reshape(A_flat, nh, 4)
-    con_h = cs.mtimes(A_ineq, u) - b_vec  # A_ineq*u - b_ineq <= 0
+    b_vec = p[nh * nu:]
+    # Build constraint row-by-row (avoids CasADi column-major reshape pitfall)
+    con_h_rows = []
+    for i in range(nh):
+        a_row = p[i * nu: (i + 1) * nu]
+        con_h_rows.append(cs.dot(a_row, u) - b_vec[i])
+    con_h = cs.vertcat(*con_h_rows)
+
+    x_dummy = cs.SX.sym("x_dummy")
 
     ocp = AcadosOcp()
     ocp.model.name = f"cbf_qp_nh{nh}"
-    ocp.model.x = cs.vertcat(cs.SX.sym("x_dummy"))  # dummy state (1 dim)
+    ocp.model.x = cs.vertcat(x_dummy)
     ocp.model.u = u
     ocp.model.p = p
     ocp.model.disc_dyn_expr = ocp.model.x  # x_next = x
-    ocp.model.cost_expr_ext_cost = cs.dot(u, u)  # u'*u
-    ocp.model.con_h_expr = con_h
+    # With N=1, con_h_expr applies to intermediate stages (1..N-1) which is empty.
+    # Use con_h_expr_0 for the initial (and only) shooting stage.
+    ocp.model.con_h_expr_0 = con_h
 
-    ocp.dims.nh = nh
-    ocp.constraints.lh = np.full(nh, -1e30)
-    ocp.constraints.uh = np.zeros(nh)
-    # Actuator limits as box constraints on u (all 4 motors); values overridden at runtime
+    # NONLINEAR_LS cost: 0.5*(y-yref)'*W*(y-yref) with y=u, yref=0, W=2I
+    # gives 0.5*u'*2I*u = ||u_cbf||^2  (same as MPC cost formulation)
+    ocp.model.cost_y_expr = u
+    ocp.cost.cost_type = "NONLINEAR_LS"
+    ocp.cost.W = 2.0 * np.eye(nu)
+    ocp.cost.yref = np.zeros(nu)
+    # Terminal cost (dummy state, zero weight)
+    ocp.model.cost_y_expr_e = cs.vertcat(x_dummy)
+    ocp.cost.cost_type_e = "NONLINEAR_LS"
+    ocp.cost.W_e = np.zeros((1, 1))
+    ocp.cost.yref_e = np.zeros(1)
+
+    ocp.dims.nh_0 = nh
+    ocp.constraints.lh_0 = np.full(nh, -1e9)
+    ocp.constraints.uh_0 = np.zeros(nh)
     ocp.constraints.idxbu = np.array([0, 1, 2, 3])
     ocp.constraints.lbu = np.full(4, -1e10)
     ocp.constraints.ubu = np.full(4, 1e10)
     ocp.parameter_values = np.zeros(np_param)
 
-    # Use new API to avoid repeated "AcadosOcpDims.N migrated to N_horizon" warnings
     if hasattr(ocp.solver_options, "N_horizon"):
         ocp.solver_options.N_horizon = 1
     else:
         ocp.dims.N = 1
-    ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"
+    ocp.solver_options.tf = 1.0
+    ocp.solver_options.integrator_type = "DISCRETE"
+    # All solver settings identical to MPC (mpc_controller.py)
+    ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
     ocp.solver_options.nlp_solver_type = "SQP"
-    ocp.solver_options.hessian_approx = "EXACT"
-    ocp.solver_options.nlp_solver_max_iter = 1
-    ocp.solver_options.tol = 1e-8
-    ocp.solver_options.qp_tol_eq = 1e-8
-    ocp.solver_options.qp_tol_ineq = 1e-8
+    ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
+    ocp.solver_options.nlp_solver_max_iter = 100
+    ocp.solver_options.print_level = 0
+    ocp.solver_options.qp_solver_iter_max = 200
+    ocp.solver_options.levenberg_marquardt = 0.0
+    ocp.solver_options.nlp_solver_tol_stat = 1e-6
+    ocp.solver_options.nlp_solver_tol_eq = 1e-6
+    ocp.solver_options.nlp_solver_tol_ineq = 1e-6
+    ocp.solver_options.nlp_solver_tol_comp = 1e-4
 
     _ACADOS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     code_export_dir = str(_ACADOS_CACHE_DIR / f"cbf_nh{nh}")
+    if hasattr(ocp, 'code_gen_opts') and hasattr(ocp.code_gen_opts, 'code_export_directory'):
+        ocp.code_gen_opts.code_export_directory = code_export_dir
+    else:
+        ocp.code_export_directory = code_export_dir
+    json_path = os.path.join(code_export_dir, "acados_ocp.json")
     try:
         with _suppress_stderr():
-            solver = AcadosOcpSolver(ocp, json_file=os.path.join(code_export_dir, "acados_ocp.json"), build=True, generate=True)
+            solver = AcadosOcpSolver(ocp, json_file=json_path, build=True, generate=True)
     except Exception:
         return None
     _ACADOS_SOLVER_CACHE[nh] = (solver, np_param)
@@ -464,25 +492,183 @@ def solve_cbf_qp_acados(
     nh = A_ineq.shape[0] if A_ineq.size > 0 else 0
     n = H.shape[0]
     if nh == 0:
-        # No inequality constraints: just box-constrained QP; solve in closed form or use OSQP
         return None
     cached = _build_acados_cbf_solver(nh)
     if cached is None:
         return None
     solver, np_param = cached
     p_val = np.concatenate([A_ineq.ravel(), np.asarray(b_ineq, dtype=np.float64).ravel()])
-    with _suppress_stderr():
+    with _suppress_output():
         solver.set(0, "p", p_val)
+        solver.set(1, "p", p_val)
         solver.constraints_set(0, "lbu", lb)
         solver.constraints_set(0, "ubu", ub)
         solver.set(0, "x", np.array([0.0]))
+        solver.set(0, "u", np.zeros(4))
+        solver.set(1, "x", np.array([0.0]))
         status = solver.solve()
     if status != 0:
         _last_qp_failure_reason = f"acados: solver status={status}"
         return None
-    with _suppress_stderr():
+    with _suppress_output():
         u_cbf = solver.get(0, "u")
     return np.asarray(u_cbf, dtype=np.float64).ravel()
+
+
+# ---------------------------------------------------------------------------
+# Acados-based slack CBF solver (extended variable [u_CBF; epsilon])
+# ---------------------------------------------------------------------------
+_ACADOS_SLACK_SOLVER_CACHE: dict = {}
+_ACADOS_SLACK_CACHE_DIR = _REPO_ROOT / "build" / "cbf_acados_slack"
+
+
+def _build_acados_cbf_slack_solver(nh: int, K_lin: float, K_quad: float):
+    """Build acados OCP solver for slack CBF QP (NONLINEAR_LS, same as MPC):
+       min ||u_CBF||^2 + K_lin*sum(eps) + K_quad*sum(eps^2)
+       s.t. A_ineq*u_CBF - epsilon <= b_ineq, epsilon >= 0, lb <= u_CBF <= ub.
+    Extended decision variable: [u_CBF(4), epsilon(nh)].
+    Implemented via completing the square in NONLINEAR_LS so GAUSS_NEWTON is valid."""
+    if nh in _ACADOS_SLACK_SOLVER_CACHE:
+        return _ACADOS_SLACK_SOLVER_CACHE[nh]
+    try:
+        import casadi as cs
+        from acados_template import AcadosOcp, AcadosOcpSolver
+    except ImportError:
+        try:
+            from acados import AcadosOcp, AcadosOcpSolver
+            import casadi as cs
+        except ImportError:
+            return None
+
+    nu = 4
+    n_ext = nu + nh
+    np_param = nh * nu + nh
+    u_ext = cs.SX.sym("u_ext", n_ext)
+    p = cs.SX.sym("p", np_param)
+    b_vec = p[nh * nu:]
+    u_cbf = u_ext[:nu]
+    eps = u_ext[nu:]
+
+    # Build constraint row-by-row (avoids CasADi column-major reshape pitfall)
+    con_h_rows = []
+    for i in range(nh):
+        a_row = p[i * nu: (i + 1) * nu]
+        con_h_rows.append(cs.dot(a_row, u_cbf) - eps[i] - b_vec[i])
+    con_h = cs.vertcat(*con_h_rows)
+
+    x_dummy = cs.SX.sym("x_dummy")
+
+    ocp = AcadosOcp()
+    ocp.model.name = f"cbf_slack_nh{nh}"
+    ocp.model.x = cs.vertcat(x_dummy)
+    ocp.model.u = u_ext
+    ocp.model.p = p
+    ocp.model.disc_dyn_expr = ocp.model.x
+    # With N=1, use con_h_expr_0 for the initial (and only) shooting stage.
+    ocp.model.con_h_expr_0 = con_h
+
+    # NONLINEAR_LS cost: 0.5*(y-yref)'*W*(y-yref)
+    # For u_cbf: W=2I, yref=0  →  ||u_cbf||^2
+    # For eps:   complete the square to get K_lin*eps + K_quad*eps^2:
+    #   K_quad*(eps + K_lin/(2*K_quad))^2 = K_quad*eps^2 + K_lin*eps + const
+    #   → W_eps = 2*K_quad, yref_eps = -K_lin/(2*K_quad)
+    # When K_quad=0, use a small value to approximate pure linear penalty.
+    K_q_eff = max(K_quad, 1e-4)
+    eps_ref = -K_lin / (2.0 * K_q_eff)
+    ocp.model.cost_y_expr = u_ext
+    ocp.cost.cost_type = "NONLINEAR_LS"
+    W_diag = np.concatenate([2.0 * np.ones(nu), 2.0 * K_q_eff * np.ones(nh)])
+    ocp.cost.W = np.diag(W_diag)
+    yref = np.zeros(n_ext)
+    yref[nu:] = eps_ref
+    ocp.cost.yref = yref
+    ocp.model.cost_y_expr_e = cs.vertcat(x_dummy)
+    ocp.cost.cost_type_e = "NONLINEAR_LS"
+    ocp.cost.W_e = np.zeros((1, 1))
+    ocp.cost.yref_e = np.zeros(1)
+
+    ocp.dims.nh_0 = nh
+    ocp.constraints.lh_0 = np.full(nh, -1e9)
+    ocp.constraints.uh_0 = np.zeros(nh)
+    ocp.constraints.idxbu = np.arange(n_ext)
+    ocp.constraints.lbu = np.concatenate([np.full(nu, -1e10), np.zeros(nh)])
+    ocp.constraints.ubu = np.full(n_ext, 1e10)
+    ocp.parameter_values = np.zeros(np_param)
+
+    if hasattr(ocp.solver_options, "N_horizon"):
+        ocp.solver_options.N_horizon = 1
+    else:
+        ocp.dims.N = 1
+    ocp.solver_options.tf = 1.0
+    ocp.solver_options.integrator_type = "DISCRETE"
+    # All solver settings identical to MPC (mpc_controller.py)
+    ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
+    ocp.solver_options.nlp_solver_type = "SQP"
+    ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
+    ocp.solver_options.nlp_solver_max_iter = 100
+    ocp.solver_options.print_level = 0
+    ocp.solver_options.qp_solver_iter_max = 200
+    ocp.solver_options.levenberg_marquardt = 0.0
+    ocp.solver_options.nlp_solver_tol_stat = 1e-6
+    ocp.solver_options.nlp_solver_tol_eq = 1e-6
+    ocp.solver_options.nlp_solver_tol_ineq = 1e-6
+    ocp.solver_options.nlp_solver_tol_comp = 1e-4
+
+    _ACADOS_SLACK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    code_export_dir = str(_ACADOS_SLACK_CACHE_DIR / f"cbf_slack_nh{nh}")
+    if hasattr(ocp, 'code_gen_opts') and hasattr(ocp.code_gen_opts, 'code_export_directory'):
+        ocp.code_gen_opts.code_export_directory = code_export_dir
+    else:
+        ocp.code_export_directory = code_export_dir
+    json_path = os.path.join(code_export_dir, "acados_ocp.json")
+    try:
+        with _suppress_stderr():
+            solver = AcadosOcpSolver(ocp, json_file=json_path, build=True, generate=True)
+    except Exception:
+        return None
+    _ACADOS_SLACK_SOLVER_CACHE[nh] = (solver, np_param, n_ext)
+    return _ACADOS_SLACK_SOLVER_CACHE[nh]
+
+
+def solve_cbf_qp_acados_slack(
+    A_ineq_rows: list,
+    b_ineq_vals: list,
+    lb_u: np.ndarray,
+    ub_u: np.ndarray,
+    K_lin: float,
+    K_quad: float = 0.0,
+) -> Optional[np.ndarray]:
+    """Solve slack CBF QP via acados. Returns [u_CBF(4), epsilon(nh)] or None."""
+    global _last_qp_failure_reason
+    nh = len(A_ineq_rows)
+    if nh == 0:
+        return None
+    cached = _build_acados_cbf_slack_solver(nh, K_lin, K_quad)
+    if cached is None:
+        return None
+    solver, np_param, n_ext = cached
+    nu = 4
+    A_ineq = np.vstack(A_ineq_rows).astype(np.float64)
+    b_ineq = np.asarray(b_ineq_vals, dtype=np.float64).ravel()
+    p_val = np.concatenate([A_ineq.ravel(), b_ineq])
+    # Box bounds: [lb_u; 0] to [ub_u; 1e10]
+    lb_ext = np.concatenate([np.asarray(lb_u, dtype=np.float64), np.zeros(nh)])
+    ub_ext = np.concatenate([np.asarray(ub_u, dtype=np.float64), np.full(nh, 1e10)])
+    with _suppress_output():
+        solver.set(0, "p", p_val)
+        solver.set(1, "p", p_val)
+        solver.constraints_set(0, "lbu", lb_ext)
+        solver.constraints_set(0, "ubu", ub_ext)
+        solver.set(0, "x", np.array([0.0]))
+        solver.set(0, "u", np.zeros(n_ext))
+        solver.set(1, "x", np.array([0.0]))
+        status = solver.solve()
+    if status != 0:
+        _last_qp_failure_reason = f"acados slack: solver status={status}"
+        return None
+    with _suppress_output():
+        x_sol = solver.get(0, "u")
+    return np.asarray(x_sol, dtype=np.float64).ravel()
 
 
 def solve_cbf_qp(
@@ -516,10 +702,10 @@ def solve_cbf_qp(
 
 class CBFFilter:
     """
-    CBF safety filter: given state x and RL action u_RL (motor thrusts), returns u_safe
-    that satisfies position barriers and actuator limits (minimum intervention QP).
-    Supports continuous-time CBF (L_f h + L_g h u >= -alpha*h) or discrete CBF
-    (h_{k+1} >= (1-gamma)*h_k with sigma/gamma shaping, paper-style).
+    CBF safety filter (Cheng et al. AAAI 2019): given state x and RL action u_RL,
+    returns u_safe = u_RL + u_CBF that satisfies barrier conditions and actuator limits.
+    Discrete CBF (Eq 8): h_{t+1} >= (1-eta)*h_t with fixed eta in [0,1].
+    Also supports continuous-time CBF: L_f h + L_g h u >= -alpha*h.
     """
 
     def __init__(self, config_path: Optional[Union[str, Path]] = None):
@@ -528,9 +714,7 @@ class CBFFilter:
         self._solver = str(cfg.get("solver", "osqp")).lower()
         self._discrete_cbf = bool(cfg.get("discrete_cbf", False))
         self._dt = float(cfg.get("dt", 0.02))
-        self._gamma_min = float(cfg.get("gamma_min", 0.1))
-        self._gamma_max = float(cfg.get("gamma_max", 0.95))
-        self._sigma_param = float(cfg.get("sigma_param", 10.0))
+        self._eta = float(cfg.get("eta", 0.01))
         self._discrete_cbf_use_model_step = bool(cfg.get("discrete_cbf_use_model_step", True))
         integ = str(cfg.get("integrate", "euler")).lower()
         self._integrate = integ if integ in ("euler", "rk4") else "euler"
@@ -547,6 +731,7 @@ class CBFFilter:
         self._last_qp_failed = False
         self._use_slack = bool(cfg.get("use_slack", False))
         self._K_lin = float(cfg.get("K_lin", 1e6))
+        self._K_quad = float(cfg.get("K_quad", 0.0))
         self._max_iter = int(cfg.get("max_iter", 4000))  # OSQP max iterations (when solver is osqp)
         self._last_u_cbf: Optional[np.ndarray] = None
         self._last_slack: Optional[dict] = None  # barrier name -> slack value (when use_slack)
@@ -608,13 +793,13 @@ class CBFFilter:
                 if self._discrete_cbf_use_model_step:
                     A_row, b_scalar = compute_discrete_cbf_inequality_from_model_step(
                         self._model, x, u_rl, self._dt, bar,
-                        self._gamma_min, self._gamma_max, self._sigma_param,
+                        eta=self._eta,
                         integrate=self._integrate,
                     )
                 else:
                     A_row, b_scalar = compute_discrete_cbf_inequality(
                         self._model, x, bar, u_rl,
-                        self._dt, self._gamma_min, self._gamma_max, self._sigma_param,
+                        self._dt, eta=self._eta,
                     )
                 ineq_list_A.append(A_row)
                 ineq_list_b.append(b_scalar)
@@ -630,25 +815,28 @@ class CBFFilter:
         ub_u = np.asarray(u_max - u_rl, dtype=np.float64)
 
         if self._use_slack and ineq_list_A:
-            # Paper main optimization: variable x = [u_CBF; epsilon], min ||u_CBF||^2 + K_lin*sum(epsilon)
-            # s.t. -L_g_h_j·u_CBF - epsilon_j <= -rhs_cbf_j, epsilon_j >= 0, u_CBF in box.
             nh = len(ineq_list_A)
-            n_x = n_u + nh
-            H_slack = np.zeros((n_x, n_x), dtype=np.float64)
-            H_slack[:n_u, :n_u] = 2.0 * np.eye(n_u, dtype=np.float64)
-            g_slack = np.zeros(n_x, dtype=np.float64)
-            g_slack[n_u:] = self._K_lin
-            A_slack = np.zeros((nh, n_x), dtype=np.float64)
-            for j in range(nh):
-                A_slack[j, :n_u] = ineq_list_A[j]
-                A_slack[j, n_u + j] = -1.0
-            b_slack = np.array(ineq_list_b, dtype=np.float64)
-            lb_slack = np.concatenate([lb_u, np.zeros(nh, dtype=np.float64)])
-            ub_slack = np.concatenate([ub_u, np.full(nh, 1e10, dtype=np.float64)])
-            # Slack QP: use osqp (acados is built for u-only)
-            x_sol = solve_cbf_qp(H_slack, g_slack, A_slack, b_slack, lb_slack, ub_slack, solver="osqp", max_iter=self._max_iter)
+            x_sol = None
+            if self._solver == "acados":
+                x_sol = solve_cbf_qp_acados_slack(ineq_list_A, ineq_list_b, lb_u, ub_u, self._K_lin, self._K_quad)
             if x_sol is None:
-                x_sol = solve_cbf_qp(H_slack, g_slack, A_slack, b_slack, lb_slack, ub_slack, solver="scipy")
+                n_x = n_u + nh
+                H_slack = np.zeros((n_x, n_x), dtype=np.float64)
+                H_slack[:n_u, :n_u] = 2.0 * np.eye(n_u, dtype=np.float64)
+                for j in range(nh):
+                    H_slack[n_u + j, n_u + j] = 2.0 * self._K_quad
+                g_slack = np.zeros(n_x, dtype=np.float64)
+                g_slack[n_u:] = self._K_lin
+                A_slack = np.zeros((nh, n_x), dtype=np.float64)
+                for j in range(nh):
+                    A_slack[j, :n_u] = ineq_list_A[j]
+                    A_slack[j, n_u + j] = -1.0
+                b_slack = np.array(ineq_list_b, dtype=np.float64)
+                lb_slack = np.concatenate([lb_u, np.zeros(nh, dtype=np.float64)])
+                ub_slack = np.concatenate([ub_u, np.full(nh, 1e10, dtype=np.float64)])
+                x_sol = solve_cbf_qp(H_slack, g_slack, A_slack, b_slack, lb_slack, ub_slack, solver="osqp", max_iter=self._max_iter)
+                if x_sol is None:
+                    x_sol = solve_cbf_qp(H_slack, g_slack, A_slack, b_slack, lb_slack, ub_slack, solver="scipy")
             u_cbf = x_sol[:n_u].astype(np.float64) if x_sol is not None else None
             if u_cbf is not None:
                 eps = x_sol[n_u:n_u + nh]
@@ -665,10 +853,6 @@ class CBFFilter:
             self._last_u_cbf = None
             self._last_slack = None
             self._last_qp_failed = True
-            warnings.warn(
-                "CBF QP infeasible; using raw RL action (u_safe = u_rl). "
-                "State may leave safe set."
-            )
             return self._model.clamp_motor_thrusts(u_rl)
         self._last_u_cbf = u_cbf
         self._last_qp_failed = False
@@ -676,9 +860,81 @@ class CBFFilter:
         return u_safe
 
 
+def _diagnose_acados_vs_osqp():
+    """Compare acados and OSQP solutions on the same CBF QP for several states."""
+    print("=" * 70)
+    print("ACADOS vs OSQP CBF QP diagnosis")
+    print("=" * 70)
+
+    flt = CBFFilter()
+    model = flt.model
+    barriers = flt.barriers
+    alpha = flt._alpha
+    u_min, u_max = model.get_thrust_limits()
+    hover = np.ones(4) * (model.mass * (-model.gravity) / 4.0)
+
+    test_cases = [
+        ("hover z=3 vz=0",    [0, 0, 3],  [0, 0, 0],    hover),
+        ("hover z=5 vz=0",    [0, 0, 5],  [0, 0, 0],    hover),
+        ("ascend z=5 vz=2",   [0, 0, 5],  [0, 0, 2],    hover * 1.3),
+        ("ascend z=7 vz=1",   [0, 0, 7],  [0, 0, 1],    hover * 1.1),
+        ("near ceil z=7.5 vz=0.5", [0, 0, 7.5], [0, 0, 0.5], hover * 1.05),
+        ("at ceil z=8 vz=0",  [0, 0, 8],  [0, 0, 0],    hover),
+        ("past ceil z=9 vz=0",[0, 0, 9],  [0, 0, 0],    hover),
+    ]
+
+    for label, pos, vel, u_rl in test_cases:
+        x = np.zeros(STATE_DIM)
+        x[ATT] = [1.0, 0.0, 0.0, 0.0]
+        x[POS] = np.array(pos, dtype=np.float64)
+        x[VEL] = np.array(vel, dtype=np.float64)
+        u_rl = np.array(u_rl, dtype=np.float64)
+
+        ineq_A, ineq_b = [], []
+        for bar in barriers:
+            L_f_h, L_g_h = compute_hocbf_derivatives(model, x, bar)
+            h_val = bar.h(x[POS], x[VEL])
+            rhs = -alpha * h_val - L_f_h - float(np.dot(L_g_h, u_rl))
+            ineq_A.append(-np.asarray(L_g_h, dtype=np.float64))
+            ineq_b.append(-rhs)
+
+        A_ineq = np.vstack(ineq_A)
+        b_ineq = np.array(ineq_b, dtype=np.float64)
+        H = 2.0 * np.eye(4)
+        g_vec = np.zeros(4)
+        lb = np.asarray(u_min - u_rl, dtype=np.float64)
+        ub = np.asarray(u_max - u_rl, dtype=np.float64)
+
+        u_osqp = solve_cbf_qp_osqp(H, g_vec, A_ineq, b_ineq, lb, ub, max_iter=4000)
+        u_acados = solve_cbf_qp_acados(H, g_vec, A_ineq, b_ineq, lb, ub)
+
+        # Check constraint satisfaction
+        def check_constraints(u_sol, name):
+            if u_sol is None:
+                return f"{name}: FAILED (None)"
+            viol = A_ineq @ u_sol - b_ineq
+            max_viol = np.max(viol)
+            box_lo = np.min(u_sol - lb)
+            box_hi = np.min(ub - u_sol)
+            return (f"{name}: |u|={np.linalg.norm(u_sol):.5f}  "
+                    f"u=[{u_sol[0]:+.4f},{u_sol[1]:+.4f},{u_sol[2]:+.4f},{u_sol[3]:+.4f}]  "
+                    f"max_con_viol={max_viol:+.6f}  box_ok={box_lo >= -1e-6 and box_hi >= -1e-6}")
+
+        h_ceil = barriers[1].h(x[POS], x[VEL])
+        print(f"\n--- {label}  h_ceil={h_ceil:+.3f} ---")
+        print(f"  {check_constraints(u_osqp, 'OSQP  ')}")
+        print(f"  {check_constraints(u_acados, 'ACADOS')}")
+        if u_osqp is not None and u_acados is not None:
+            diff = np.linalg.norm(u_osqp - u_acados)
+            print(f"  DIFF: {diff:.6f}")
+
+
 def main() -> None:
     """Quick test: filter a random action and check barrier values."""
-    from scripts.quadrotor_model import QuadrotorModel
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--diagnose":
+        _diagnose_acados_vs_osqp()
+        return
 
     flt = CBFFilter()
     x = np.zeros(STATE_DIM)
