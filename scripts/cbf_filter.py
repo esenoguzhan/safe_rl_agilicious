@@ -520,6 +520,14 @@ def solve_cbf_qp_acados(
 # ---------------------------------------------------------------------------
 _ACADOS_SLACK_SOLVER_CACHE: dict = {}
 _ACADOS_SLACK_CACHE_DIR = _REPO_ROOT / "build" / "cbf_acados_slack"
+# When False, reuse existing generated acados slack solver .so without forcing a rebuild.
+_CBF_ACADOS_SLACK_FORCE_REBUILD = True
+
+
+def set_cbf_acados_slack_force_rebuild(force: bool) -> None:
+    """If False, skip acados code generation/rebuild when the solver .so already exists."""
+    global _CBF_ACADOS_SLACK_FORCE_REBUILD
+    _CBF_ACADOS_SLACK_FORCE_REBUILD = bool(force)
 
 
 def _build_acados_cbf_slack_solver(nh: int, K_lin: float, K_quad: float):
@@ -621,11 +629,24 @@ def _build_acados_cbf_slack_solver(nh: int, K_lin: float, K_quad: float):
     else:
         ocp.code_export_directory = code_export_dir
     json_path = os.path.join(code_export_dir, "acados_ocp.json")
+    model_so_name = f"libacados_ocp_solver_cbf_slack_nh{nh}.so"
+    so_path = os.path.join(code_export_dir, model_so_name)
+    reuse = (not _CBF_ACADOS_SLACK_FORCE_REBUILD) and os.path.isfile(so_path)
     try:
         with _suppress_stderr():
-            solver = AcadosOcpSolver(ocp, json_file=json_path, build=True, generate=True)
+            if reuse:
+                solver = AcadosOcpSolver(ocp, json_file=json_path, build=False, generate=False)
+            else:
+                solver = AcadosOcpSolver(ocp, json_file=json_path, build=True, generate=True)
     except Exception:
-        return None
+        if reuse:
+            try:
+                with _suppress_stderr():
+                    solver = AcadosOcpSolver(ocp, json_file=json_path, build=True, generate=True)
+            except Exception:
+                return None
+        else:
+            return None
     _ACADOS_SLACK_SOLVER_CACHE[nh] = (solver, np_param, n_ext)
     return _ACADOS_SLACK_SOLVER_CACHE[nh]
 
@@ -708,7 +729,15 @@ class CBFFilter:
     Also supports continuous-time CBF: L_f h + L_g h u >= -alpha*h.
     """
 
-    def __init__(self, config_path: Optional[Union[str, Path]] = None):
+    def __init__(
+        self,
+        config_path: Optional[Union[str, Path]] = None,
+        quadrotor_model_path: Optional[Union[str, Path]] = None,
+    ):
+        """
+        quadrotor_model_path : if set, overrides cbf.quadrotor_model_path in the YAML
+        (e.g. mismatched model for sim-vs-controller ablations while sim uses truth dynamics).
+        """
         cfg = _load_cbf_config(config_path)
         self._alpha = float(cfg.get("alpha", 0.5))
         self._solver = str(cfg.get("solver", "osqp")).lower()
@@ -718,7 +747,11 @@ class CBFFilter:
         self._discrete_cbf_use_model_step = bool(cfg.get("discrete_cbf_use_model_step", True))
         integ = str(cfg.get("integrate", "euler")).lower()
         self._integrate = integ if integ in ("euler", "rk4") else "euler"
-        quad_cfg = cfg.get("quadrotor_model_path")
+        quad_cfg = (
+            quadrotor_model_path
+            if quadrotor_model_path is not None
+            else cfg.get("quadrotor_model_path")
+        )
         self._model = QuadrotorModel(config_path=quad_cfg)
         r_uav = float(cfg.get("r_uav", 0.0))
         self._barriers: List[HOCBFBarrier] = []

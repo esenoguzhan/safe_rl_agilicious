@@ -1,0 +1,309 @@
+# Same scenarios / training alignment as config_scenarious_2.yaml, but comparison_runs
+# use quadrotor_overrides (simulation / Flightmare plant) per run.
+#
+#   python scripts/compare_scenarios_fair_runs_sim_plant.py \
+#     --scenarios_config configs/config_scenarious_2_sim_plant.yaml \
+#     --checkpoint ... --cbf_config ... --mpc_config ...
+#
+# nominal: base `quadrotor:` below for all scenarios.
+# mass_mismatch_sim: only sim mass overridden; motor_tau from base quadrotor:.
+# motor_tau_mismatch_sim: only sim motor_tau overridden; mass from base quadrotor:.
+# controller_model_overrides: optional MPC/CBF Python model (unchanged from fair_runs).
+
+comparison_base_seed: 10
+
+comparison_runs:
+  - name: nominal
+    description: "Simulation matches base quadrotor:; nominal controller model."
+    base_quadrotor_model_path: configs/quadrotor_model.yaml
+    controller_model_overrides: {}
+    quadrotor_overrides: {}
+
+  - name: mass_mismatch_sim
+    description: "Heavier mass in sim only; nominal configs/quadrotor_model.yaml for MPC/CBF."
+    base_quadrotor_model_path: configs/quadrotor_model.yaml
+    controller_model_overrides: {}
+    quadrotor_overrides:
+      mass: 0.9
+
+  - name: motor_tau_mismatch_sim
+    description: "Slower motors in sim only; nominal mass from quadrotor: below."
+    base_quadrotor_model_path: configs/quadrotor_model.yaml
+    controller_model_overrides: {}
+    quadrotor_overrides:
+      motor_tau: 0.06
+
+
+  - name: mass_and_motor_tau_mismatch_sim
+    description: "Slower motors in sim only and heavier mass in sim only"
+    base_quadrotor_model_path: configs/quadrotor_model.yaml
+    controller_model_overrides: {}
+    quadrotor_overrides:
+      motor_tau: 0.06
+      mass: 0.9
+
+goal: [0.0, 0.0, 10.0]
+motor_init: zero
+max_episode_steps: 1000
+sim_dt: 0.02
+
+world_box: [-30.0, 30.0, -30.0, 30.0, 0.0, 30.0]
+
+observation_noise:
+  position: 0.015
+  velocity: 0.08
+
+quadrotor:
+  mass: 0.774
+  arm_l: 0.125
+  motor_omega_min: 150.0
+  motor_omega_max: 2800.0
+  motor_tau: 0.033
+  thrust_map: [1.562522e-6, 0.0, 0.0]
+  kappa: 0.022
+  omega_max: [10.0, 10.0, 4.0]
+
+disturbances:
+  enable: true
+  drag_coeff: [0.03, 0.03, 0.07]
+  wind_mean: [5.0, 2.0, 0.0]
+  wind_var: [2.5, 1.5, 0.1]
+  force_noise_std: [0.08, 0.08, 0.12]
+  torque_noise_std: [0.035, 0.035, 0.008]
+  ou_theta: 1.2
+  ou_sigma: [0.6, 0.6, 0.2]
+
+position_barriers:
+  - name: ground
+    n: [0.0, 0.0, 1.0]
+    q: 1.0
+    kv: 0.5
+  - name: ceiling
+    n: [0.0, 0.0, -1.0]
+    q: 8.0
+    kv: 0.5
+  - name: x_min
+    n: [1.0, 0.0, 0.0]
+    q: 8.0
+    kv: 0.5
+  - name: x_max
+    n: [-1.0, 0.0, 0.0]
+    q: 8.0
+    kv: 0.5
+  - name: y_min
+    n: [0.0, 1.0, 0.0]
+    q: 8.0
+    kv: 0.5
+  - name: y_max
+    n: [0.0, -1.0, 0.0]
+    q: 8.0
+    kv: 0.5
+
+rl_policy:
+  checkpoint: null
+  deterministic: true
+  normalize_obs: true
+  action_history_len: 5
+  custom_reward:
+    enabled: true
+    mode: cauchy
+    cauchy_scale: 0.5
+    cauchy_scale_wide: 0.05
+    cauchy_scale_sharp: 1.0
+    cauchy_wide_weight: 0.6
+    cauchy_sharp_weight: 0.4
+    x_goal: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    act_goal: [0.0, 0.0, 0.0, 0.0]
+    rew_state_weight: [
+      1.5, 1.5, 2.0,
+      0.3, 0.3, 0.3, 0.3,
+      0.1, 0.1, 0.1,
+      0.1, 0.1, 0.1,
+    ]
+    rew_act_weight: [0.03, 0.03, 0.03, 0.03]
+    rew_act_rate_weight: [0.05, 0.05, 0.05, 0.05]
+    goal_approach_weight: 0.05
+    goal_approach_eps: 1.0e-6
+    l1_pos_penalty: 0.0
+    crash_penalty: -10.0
+    max_pos_error: 30.0
+
+plotting:
+  save_plots: false
+  plot_dir: scenario_plots_sim_plant
+
+# scenarios:
+#   - name: "Hover (upright, 0 vel)"
+#     position: [0.0, 0.0, 3.0]
+#     quaternion: [1.0, 0.0, 0.0, 0.0]
+#     velocity: [0.0, 0.0, 0.0]
+#     angular_velocity: [0.0, 0.0, 0.0]
+
+#   - name: "Near-hover asymmetric bump"
+#     position: [0.0, 0.0, 3.0]
+#     quaternion: [1.0, 0.0, 0.0, 0.0]
+#     velocity: [0.42, -0.28, 0.11]
+#     angular_velocity: [0.12, -0.18, 0.06]
+
+#   - name: "Forward-biased drift (+ mild rates)"
+#     position: [0.0, 0.0, 3.0]
+#     quaternion: [1.0, 0.0, 0.0, 0.0]
+#     velocity: [3.55, 0.65, -0.35]
+#     angular_velocity: [0.48, -0.32, 0.22]
+
+#   - name: "Cross-track dominant (lateral slide)"
+#     position: [0.0, 0.0, 3.0]
+#     quaternion: [1.0, 0.0, 0.0, 0.0]
+#     velocity: [-0.95, 3.45, 0.22]
+#     angular_velocity: [0.72, -0.38, 0.14]
+
+#   - name: "Descent with diagonal drift"
+#     position: [0.0, 0.0, 3.0]
+#     quaternion: [1.0, 0.0, 0.0, 0.0]
+#     velocity: [2.15, -1.65, -1.25]
+#     angular_velocity: [0.55, -0.45, 0.35]
+
+#   - name: "45° tilt — recovery (asymmetric vel + ω)"
+#     position: [0.0, 0.0, 3.0]
+#     quaternion: [0.9239, 0.3827, 0.0, 0.0]
+#     velocity: [2.65, -1.75, 0.55]
+#     angular_velocity: [1.95, -2.35, 1.05]
+
+#   - name: "Upside-down (0 vel)"
+#     position: [0.0, 0.0, 3.0]
+#     quaternion: [0.0, 1.0, 0.0, 0.0]
+#     velocity: [0.0, 0.0, 0.0]
+#     angular_velocity: [0.0, 0.0, 0.0]
+
+#   - name: "Upside-down — aggressive asymmetric"
+#     position: [0.0, 0.0, 3.0]
+#     quaternion: [0.0, 1.0, 0.0, 0.0]
+#     velocity: [2.35, -3.15, 0.75]
+#     angular_velocity: [2.65, -1.85, 2.15]
+
+
+scenarios:
+  # # ─── TIER 1: UPRIGHT, POSITION STRESS ───────────────────────────────────────
+  # # Tests goal-reaching from spatial offset with no attitude challenge.
+  # # MPC and RL should both handle these; establishes baseline position error.
+
+  # - name: "Hover (upright, 0 vel)"
+  #   position: [0.0, 0.0, 3.0]
+  #   quaternion: [1.0, 0.0, 0.0, 0.0]
+  #   velocity: [0.0, 0.0, 0.0]
+  #   angular_velocity: [0.0, 0.0, 0.0]
+
+  # - name: "Near-hover asymmetric bump"
+  #   position: [0.0, 0.0, 3.0]
+  #   quaternion: [1.0, 0.0, 0.0, 0.0]
+  #   velocity: [0.42, -0.28, 0.11]
+  #   angular_velocity: [0.12, -0.18, 0.06]
+
+  # - name: "Off-centre spawn (low altitude)"
+  #   # Tests lateral + vertical goal-reaching from non-zero position offset.
+  #   # All controllers must translate 3.5 m laterally while climbing 7 m.
+  #   position: [3.5, -2.0, 3.0]
+  #   quaternion: [1.0, 0.0, 0.0, 0.0]
+  #   velocity: [0.0, 0.0, 0.0]
+  #   angular_velocity: [0.0, 0.0, 0.0]
+
+  # - name: "Near-ceiling upright spawn"
+  #   # Spawns 1 m below the CBF barrier (z=7). CBF-active controllers must
+  #   # hold at z=8 while RL/MPC attempt to reach z=10. Directly tests
+  #   # safe-set boundary enforcement from a static start.
+  #   position: [0.0, 0.0, 7.0]
+  #   quaternion: [1.0, 0.0, 0.0, 0.0]
+  #   velocity: [0.0, 0.0, 0.0]
+  #   angular_velocity: [0.0, 0.0, 0.0]
+
+  # # ─── TIER 2: UPRIGHT, VELOCITY STRESS ───────────────────────────────────────
+  # # Tests attitude-coupled recovery under realistic post-manoeuvre states.
+
+  # - name: "Forward-biased drift (+ mild rates)"
+  #   position: [0.0, 0.0, 3.0]
+  #   quaternion: [1.0, 0.0, 0.0, 0.0]
+  #   velocity: [3.55, 0.65, -0.35]
+  #   angular_velocity: [0.48, -0.32, 0.22]
+
+  # - name: "Cross-track dominant (lateral slide)"
+  #   position: [0.0, 0.0, 3.0]
+  #   quaternion: [1.0, 0.0, 0.0, 0.0]
+  #   velocity: [-0.95, 3.45, 0.22]
+  #   angular_velocity: [0.72, -0.38, 0.14]
+
+  # - name: "Descent with diagonal drift"
+  #   position: [0.0, 0.0, 3.0]
+  #   quaternion: [1.0, 0.0, 0.0, 0.0]
+  #   velocity: [2.15, -1.65, -1.25]
+  #   angular_velocity: [0.55, -0.45, 0.35]
+
+  # - name: "High-speed approach toward barrier"
+  #   # Upright drone moving fast upward toward the CBF ceiling.
+  #   # Tests whether CBF filter activates in time under velocity-driven approach.
+  #   # MPC+Con must also slow down before z=8. RL has no explicit ceiling model.
+  #   position: [0.0, 0.0, 5.0]
+  #   quaternion: [1.0, 0.0, 0.0, 0.0]
+  #   velocity: [0.55, -0.35, 3.8]
+  #   angular_velocity: [0.15, -0.25, 0.08]
+
+  # # ─── TIER 3: TILTED ATTITUDE ─────────────────────────────────────────────────
+  # # Non-trivial attitude recovery required before goal-reaching is possible.
+
+  # - name: "45 deg tilt — recovery (asymmetric vel + omega)"
+  #   position: [0.0, 0.0, 3.0]
+  #   quaternion: [0.9239, 0.3827, 0.0, 0.0]
+  #   velocity: [2.65, -1.75, 0.55]
+  #   angular_velocity: [1.95, -2.35, 1.05]
+
+  # - name: "30 deg tilt — off-centre with rates"
+  #   # Moderate tilt combined with lateral offset. Realistic post-gust state.
+  #   # Quaternion: 30 deg rotation about x-axis, q = [cos15, sin15, 0, 0].
+  #   position: [-2.5, 1.5, 4.0]
+  #   quaternion: [0.9659, 0.2588, 0.0, 0.0]
+  #   velocity: [1.85, -0.95, -0.45]
+  #   angular_velocity: [1.25, -0.85, 0.45]
+
+  # - name: "60 deg tilt — near ground, high omega"
+  #   # Aggressive tilt close to ground — recovery must happen quickly or drone
+  #   # hits world_box floor. Tests urgency of attitude correction.
+  #   # Quaternion: 60 deg about x-axis, q = [cos30, sin30, 0, 0].
+  #   position: [0.0, 0.0, 1.8]
+  #   quaternion: [0.8660, 0.5000, 0.0, 0.0]
+  #   velocity: [1.15, -2.25, 0.35]
+  #   angular_velocity: [2.45, -1.65, 1.35]
+
+  # - name: "90 deg roll (side-on) — moderate velocity"
+  #   # Pure 90 deg roll: drone is on its side, rotors pointing horizontally.
+  #   # No net vertical thrust in this attitude — must recover before falling.
+  #   # Quaternion: 90 deg about x-axis, q = [cos45, sin45, 0, 0].
+  #   position: [0.0, 0.0, 4.0]
+  #   quaternion: [0.7071, 0.7071, 0.0, 0.0]
+  #   velocity: [1.25, -1.85, -0.55]
+  #   angular_velocity: [1.75, -2.15, 0.85]
+
+  # ─── TIER 4: INVERTED ────────────────────────────────────────────────────────
+  # Your existing upside-down scenarios. MPC recovers, RL crashes.
+  # Keep both — they are your key comparative finding.
+
+  - name: "Upside-down (0 vel)"
+    position: [0.0, 0.0, 3.0]
+    quaternion: [0.0, 1.0, 0.0, 0.0]
+    velocity: [0.0, 0.0, 0.0]
+    angular_velocity: [0.0, 0.0, 0.0]
+
+  - name: "Upside-down — aggressive asymmetric"
+    position: [0.0, 0.0, 6.0]
+    quaternion: [0.0, 1.0, 0.0, 0.0]
+    velocity: [2.35, -3.15, 0.75]
+    angular_velocity: [2.65, -1.85, 2.15]
+
+  - name: "Upside-down — high altitude"
+    # Same inverted condition but spawned at z=6, giving more time before
+    # ground impact. Tests whether extra altitude enables any recovery.
+    # If RL still crashes and MPC recovers, confirms the finding is not
+    # a timing artifact — it is a genuine policy limitation.
+    position: [0.0, 0.0, 6.0]
+    quaternion: [0.0, 1.0, 0.0, 0.0]
+    velocity: [0.0, 0.0, 0.0]
+    angular_velocity: [0.0, 0.0, 0.0]
+

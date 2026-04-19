@@ -65,6 +65,10 @@ class FlightlibVecEnv:
     def set_seed(self, seed: int) -> None:
         self._impl.setSeed(seed)
 
+    def seed_disturbance(self, seed: int) -> None:
+        """Reseed C++ disturbance RNG (wind / OU / body noise) before reset."""
+        self._impl.seedDisturbance(int(seed))
+
     def seed(self, seed=None):
         """SB3 VecEnv expects seed(seed); returns list of seeds for compatibility."""
         if seed is not None:
@@ -230,7 +234,13 @@ class ObservationNoiseWrapper:
         self._num_envs = venv.num_envs
         self._std_pos = float(noise_cfg.get("position", 0.0))
         self._std_vel = float(noise_cfg.get("velocity", 0.0))
-        self._rng = np.random.RandomState(rng_seed)
+        self._rng_seed = int(rng_seed)
+        self._rng = np.random.RandomState(self._rng_seed)
+
+    def reset_noise_rng(self, seed: int) -> None:
+        """Reset the observation-noise RNG so RL vs MPC rollouts match for the same seed."""
+        self._rng_seed = int(seed)
+        self._rng = np.random.RandomState(self._rng_seed)
 
     @property
     def num_envs(self):

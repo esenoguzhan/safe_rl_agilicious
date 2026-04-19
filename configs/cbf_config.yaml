@@ -20,7 +20,7 @@ cbf:
   # Continuous-time CBF decay rate.
   # dh/dt >= -alpha*h allows exponential decrease; the CBF intervenes when the
   # RL action would cause a faster decrease. Larger alpha = more permissive.
-  alpha: 0.7
+  alpha: 0.8
 
   # Discrete CBF parameters (only used when discrete_cbf: true).
   eta: 0.01

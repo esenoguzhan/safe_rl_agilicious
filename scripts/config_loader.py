@@ -5,6 +5,10 @@ configs to a run directory for use with flightmare_context.
 When the user overrides only *some* sections (e.g. quadrotor_env but not
 quadrotor_dynamics), we merge their overrides on top of the flightlib default
 config so the C++ side always sees a complete file.
+
+Supported top-level keys under env.* that merge into the written quadrotor_env.yaml:
+  quadrotor_env, quadrotor_dynamics, rl, disturbances
+(disturbances: wind, drag, force/torque noise, OU gusts — see flightlib configs/quadrotor_env.yaml).
 """
 import copy
 import os
@@ -84,7 +88,8 @@ def _quadrotor_env_yaml_from_config(cfg: Dict[str, Any]) -> Optional[Dict[str, A
     qe = env.get("quadrotor_env")
     qd = env.get("quadrotor_dynamics")
     rl = env.get("rl")
-    if not (qe or qd or rl):
+    dist = env.get("disturbances")
+    if not (qe or qd or rl or dist is not None):
         return None
 
     defaults = _load_flightlib_defaults()
@@ -95,6 +100,9 @@ def _quadrotor_env_yaml_from_config(cfg: Dict[str, Any]) -> Optional[Dict[str, A
         override["quadrotor_dynamics"] = qd
     if rl:
         override["rl"] = rl
+    if dist is not None:
+        # Merged with flightlib defaults so partial keys (e.g. enable + drag_coeff) work.
+        override["disturbances"] = dist
 
     return _deep_merge(defaults, override)
 
@@ -129,7 +137,7 @@ def get_vec_env_config_string(cfg: Dict[str, Any]) -> str:
 
 def prepare_env_run_dir(cfg: Dict[str, Any], paths: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """
-    Only when config has env.quadrotor_env (or quadrotor_dynamics or rl), write both
+    Only when config has env.quadrotor_env (or quadrotor_dynamics, rl, or disturbances), write both
     vec_env and quadrotor_env to run_dir and return it for flightmare_context.
     When only env.vec_env is set, return None so the C++ loads quadrotor_env.yaml
     from the original FLIGHTMARE_PATH (avoids "bad file" for missing quadrotor_env.yaml).
@@ -139,7 +147,12 @@ def prepare_env_run_dir(cfg: Dict[str, Any], paths: Optional[Dict[str, Any]] = N
     if not run_dir:
         return None
     env = cfg.get("env", {})
-    has_quadrotor_config = env.get("quadrotor_env") or env.get("quadrotor_dynamics") or env.get("rl")
+    has_quadrotor_config = (
+        env.get("quadrotor_env")
+        or env.get("quadrotor_dynamics")
+        or env.get("rl")
+        or env.get("disturbances") is not None
+    )
     if not has_quadrotor_config:
         return None
     return write_env_configs(cfg, run_dir)

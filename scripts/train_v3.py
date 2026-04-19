@@ -4,11 +4,11 @@ PPO training v3: success-based LR/entropy schedule and early stopping.
 
 Success (per episode): full length (1000 steps) and undiscounted return > 950 (see train.py).
 
-- Initial learning rate and ent_coef come from the YAML (e.g. single_stage_no_curriculum:
-  lr=5e-5, ent_coef=0.01).
-- After each eval (same frequency as EvalCallback), eval success rate is measured on the
-  eval env; when it first reaches 25%, 50%, and 75%, LR and ent_coef are each halved
-  (once per milestone).
+- Learning rate and entropy coefficient follow eval success bands (see
+  v3_lr_ent_for_success_rate): discovery [0,25%) lr=5e-4 ent=0.01; [25%,50%) lr=3e-4
+  ent=0.008; [50%,75%) lr=1e-4 ent=0.005; [75%,100%] lr=1e-4 ent=0.001 (fine-tuning).
+  Fresh runs start at discovery; each success-schedule eval updates lr/ent from the
+  current eval success rate.
 - Training stops as soon as three consecutive evals each have success rate >= 80%.
 
 Also logs train/success_rate_recent (training deque) like scripts/train.py.
@@ -49,7 +49,22 @@ VECNORM_MIN_VAR = 0.01  # minimum variance for all obs dims when loading VecNorm
 # Episode success for logging and train_v3 (full horizon + return threshold)
 SUCCESS_EPISODE_LENGTH = 1000
 SUCCESS_MIN_REWARD = 950.0
-SUCCESS_STOP_THRESHOLD = 0.80  # early stop after 3 consecutive evals at/above this rate
+SUCCESS_STOP_THRESHOLD = 0.85  # early stop after 3 consecutive evals at/above this rate
+
+# PPO lr / ent_coef by eval success rate band (train_v3 success-schedule evals)
+V3_LR_ENT_DISCOVERY = (5e-4, 0.01)
+
+
+def v3_lr_ent_for_success_rate(rate: float) -> tuple:
+    """Map eval success rate in [0,1] to (learning_rate, ent_coef)."""
+    r = float(rate)
+    if r < 0.25:
+        return (5e-4, 0.01)
+    if r < 0.50:
+        return (3e-4, 0.005)
+    if r < 0.75:
+        return (1e-4, 0.002)
+    return (1e-4, 0.001)
 
 
 def episode_success(ep_length, ep_return):
@@ -116,9 +131,20 @@ def _clamp_vecnorm_obs_variance(venv, min_var=VECNORM_MIN_VAR):
         np.maximum(var, min_var, out=var)
 
 
-def get_next_ppo_steps_dir(total_timesteps):
-    """Return models/PPO_<steps> or models/PPO_<steps>_2, etc., whichever does not exist yet."""
-    base = os.path.join(MODELS_DIR, f"PPO_{total_timesteps}")
+def _sanitize_run_name_suffix(name: str) -> str:
+    """Allow safe folder suffix: alnum, dot, underscore, hyphen."""
+    if not name:
+        return ""
+    return "".join(c if (c.isalnum() or c in "._-") else "_" for c in str(name))
+
+
+def get_next_ppo_steps_dir(total_timesteps, name_suffix=None):
+    """Return models/PPO_<steps>[_<suffix>] or ..._2, etc., whichever does not exist yet."""
+    if name_suffix:
+        suf = _sanitize_run_name_suffix(name_suffix)
+        base = os.path.join(MODELS_DIR, f"PPO_{total_timesteps}_{suf}") if suf else os.path.join(MODELS_DIR, f"PPO_{total_timesteps}")
+    else:
+        base = os.path.join(MODELS_DIR, f"PPO_{total_timesteps}")
     run_dir = base
     i = 1
     while os.path.isdir(run_dir):
@@ -253,6 +279,12 @@ def main():
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
     parser.add_argument("--seed", type=int, default=None, help="Random seed (overrides config)")
     parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Optional label: save under models/PPO_<total_timesteps>_<run_name> (still gets _2, _3 if folder exists).",
+    )
+    parser.add_argument(
         "--resume", type=str, default=None,
         help="Resume from a previous run directory or model .zip path. "
              "Loads policy weights and VecNormalize stats from that run.",
@@ -261,7 +293,7 @@ def main():
 
     cfg = load_config(args.config)
     total_timesteps = cfg.get("training", {}).get("total_timesteps", 100_000)
-    run_dir = get_next_ppo_steps_dir(total_timesteps)
+    run_dir = get_next_ppo_steps_dir(total_timesteps, args.run_name)
     os.makedirs(run_dir, exist_ok=True)
     paths = {**cfg.get("paths", {}), "log_dir": run_dir, "save_dir": run_dir}
     cfg["paths"] = paths
@@ -271,7 +303,8 @@ def main():
     print("Run directory:", run_dir)
     print(
         "[train_v3] Success = episode length 1000 and return > 950; "
-        "halve lr & ent_coef at first eval success ≥25%, 50%, 75%; "
+        "lr/ent by eval band: [0,25%) 5e-4/0.01, [25%,50%) 3e-4/0.008, "
+        "[50%,75%) 1e-4/0.005, [75%,1] 1e-4/0.001; "
         "stop after 3 consecutive evals with success ≥80%."
     )
 
@@ -332,6 +365,10 @@ def main():
     ppo_cfg = cfg.get("ppo", {})
     policy_kwargs = ppo_cfg.get("policy_kwargs") or {"net_arch": dict(pi=[128, 128], vf=[128, 128])}
     ppo_kwargs = {k: v for k, v in ppo_cfg.items() if k != "policy_kwargs"}
+    # Discovery phase hyperparameters (YAML lr/ent_coef overridden for this schedule)
+    if not args.resume:
+        ppo_kwargs["learning_rate"] = V3_LR_ENT_DISCOVERY[0]
+        ppo_kwargs["ent_coef"] = V3_LR_ENT_DISCOVERY[1]
 
     from stable_baselines3 import PPO
     from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
@@ -435,14 +472,13 @@ def main():
             return True
 
     class SuccessScheduleV3Callback(BaseCallback):
-        """Halve LR and entropy when eval success first hits 25%, 50%, 75%; stop after 3 evals >= SUCCESS_STOP_THRESHOLD."""
+        """Set LR/ent from eval success band each schedule eval; stop after 3 evals >= SUCCESS_STOP_THRESHOLD."""
 
         def __init__(self, eval_env, eval_freq, n_eval_episodes, verbose=0):
             super().__init__(verbose)
             self.eval_env = eval_env
             self.eval_freq = int(eval_freq)
             self.n_eval_episodes = int(n_eval_episodes)
-            self._milestones = {0.25: False, 0.5: False, 0.75: False}
             self._consecutive_at_stop_thr = 0
             self._lr = None
             self._ent = None
@@ -463,18 +499,16 @@ def main():
                 self.model, self.eval_env, self.n_eval_episodes, deterministic=True
             )
             self.logger.record("eval/success_rate", rate)
-            for thr in (0.25, 0.5, 0.75):
-                if rate >= thr and not self._milestones[thr]:
-                    self._milestones[thr] = True
-                    self._lr *= 0.5
-                    self._ent *= 0.5
-                    self.model.lr_schedule = get_schedule_fn(self._lr)
-                    self.model.ent_coef = self._ent
-                    if self.verbose > 0:
-                        print(
-                            f"[train_v3] Eval success {rate:.1%} crossed {thr:.0%}: "
-                            f"lr={self._lr:g} ent_coef={self._ent:g}"
-                        )
+            target_lr, target_ent = v3_lr_ent_for_success_rate(rate)
+            if target_lr != self._lr or target_ent != self._ent:
+                self._lr = target_lr
+                self._ent = target_ent
+                self.model.lr_schedule = get_schedule_fn(self._lr)
+                self.model.ent_coef = self._ent
+                if self.verbose > 0:
+                    print(
+                        f"[train_v3] Eval success {rate:.1%} → band lr={self._lr:g} ent_coef={self._ent:g}"
+                    )
             if rate >= SUCCESS_STOP_THRESHOLD:
                 self._consecutive_at_stop_thr += 1
             else:

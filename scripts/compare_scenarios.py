@@ -3,9 +3,11 @@
 Deterministic scenario comparison: RL vs RL+CBF vs MPC vs MPC+Con.
 
 Each scenario in the config specifies an exact 13-dim initial state
-[pos(3), quat(4), vel(3), omega(3)], so results are fully repeatable
-with no random seeding.  Easily extensible by adding entries to the
-scenarios list in the YAML config.
+[pos(3), quat(4), vel(3), omega(3)].  By default, the same scenario
+also fixes the stochastic stream: C++ disturbance RNG (wind / OU /
+force noise) and ObservationNoiseWrapper RNG are reseeded before each
+rollout so RL, MPC, etc. see identical noise for fair comparison.
+Use --no_sync_stochastic_seeds for the legacy behavior.
 
 Usage:
   python scripts/compare_scenarios.py \
@@ -76,7 +78,12 @@ def _build_env_cfg(scfg):
 
     quad = scfg.get("quadrotor", {})
     if quad:
+        # disturbances belong in env.disturbances / YAML root, not quadrotor_dynamics
+        quad = {k: v for k, v in quad.items() if k != "disturbances"}
         env["quadrotor_dynamics"] = quad
+    dist = scfg.get("disturbances")
+    if dist is not None:
+        env["disturbances"] = dist
 
     env["motor_init"] = scfg.get("motor_init", "hover")
     env["goal_position"] = list(scfg.get("goal", [0.0, 0.0, 5.0]))
@@ -201,6 +208,55 @@ def _get_raw_obs(env, obs):
     return (obs[:n] * np.sqrt(var[:n] + eps) + mean[:n]).astype(np.float64)
 
 
+def _find_obs_noise_wrapper(env):
+    """Walk wrapper chain for ObservationNoiseWrapper (outer → inner)."""
+    seen = set()
+    cur = env
+    for _ in range(48):
+        if cur is None or id(cur) in seen:
+            return None
+        seen.add(id(cur))
+        if cur.__class__.__name__ == "ObservationNoiseWrapper":
+            return cur
+        cur = getattr(cur, "venv", None)
+    return None
+
+
+def _scenario_rollout_seed(
+    base_seed: int,
+    scenario_index: int,
+    seed_trial: int = 0,
+) -> int:
+    """Distinct 32-bit seed per scenario and optional seed trial.
+
+    Does *not* depend on comparison-run index: nominal, mass mismatch, motor tau
+    mismatch, etc. all use the same disturbance + observation-noise stream for a
+    given scenario so controllers are evaluated under identical stochastic conditions.
+    Only ``seed_trial`` (``--n_seeds``) changes the realization for mean±std reporting.
+    """
+    s = (
+        int(base_seed)
+        + int(scenario_index) * 100_003
+        + int(seed_trial) * 100_000
+    ) & 0xFFFFFFFF
+    return s
+
+
+def _apply_rollout_seeding(env, base_env, rollout_seed: int) -> None:
+    """Reseed C++ disturbances and obs-noise RNG before env.reset()."""
+    if hasattr(base_env, "seed_disturbance"):
+        base_env.seed_disturbance(int(rollout_seed))
+    else:
+        print(
+            "  Warning: FlightlibVecEnv has no seed_disturbance — rebuild "
+            "flightlib (pip install -e flightmare/flightlib) for matched "
+            "disturbance RNG across controllers.",
+        )
+    onw = _find_obs_noise_wrapper(env)
+    if onw is not None:
+        onw.reset_noise_rng(int(rollout_seed))
+
+
 # ---------------------------------------------------------------------------
 # State setup
 # ---------------------------------------------------------------------------
@@ -215,8 +271,17 @@ def _build_state_13d(scenario, default_pos=None):
     return np.concatenate([pos, quat, vel, omega]).astype(np.float32)
 
 
-def _reset_with_state(env, base_env, state_13d, goal_pos, act_hist_len):
-    """Reset env and set exact initial state. Returns (obs_for_policy, raw_obs_13d)."""
+def _reset_with_state(env, base_env, state_13d, goal_pos, act_hist_len,
+                      rollout_seed=None):
+    """Reset env and set exact initial state. Returns (obs_for_policy, raw_obs_13d).
+
+    If rollout_seed is set, reseed disturbance + observation-noise RNGs first
+    so every controller (RL, MPC, …) sees the same stochastic realization
+    for this scenario.
+    """
+    if rollout_seed is not None:
+        _apply_rollout_seeding(env, base_env, rollout_seed)
+
     env.reset()
 
     base_env.setQuadState(state_13d)
@@ -244,8 +309,9 @@ def _reset_with_state(env, base_env, state_13d, goal_pos, act_hist_len):
 
 def _run_rl_scenario(env, base_env, model_policy, model_quad, goal_pos,
                      act_mean, act_std, max_steps, state_13d,
-                     act_hist_len, deterministic):
-    obs, raw_obs = _reset_with_state(env, base_env, state_13d, goal_pos, act_hist_len)
+                     act_hist_len, deterministic, rollout_seed=None):
+    obs, raw_obs = _reset_with_state(
+        env, base_env, state_13d, goal_pos, act_hist_len, rollout_seed)
     state = model_quad.state_from_observation(raw_obs[:STATE_OBS_DIM], goal_pos=goal_pos)
 
     positions = [state[POS].copy()]
@@ -277,8 +343,9 @@ def _run_rl_scenario(env, base_env, model_policy, model_quad, goal_pos,
 
 def _run_cbf_scenario(env, base_env, model_policy, cbf, model_quad, goal_pos,
                       act_mean, act_std, max_steps, state_13d,
-                      act_hist_len, deterministic):
-    obs, raw_obs = _reset_with_state(env, base_env, state_13d, goal_pos, act_hist_len)
+                      act_hist_len, deterministic, rollout_seed=None):
+    obs, raw_obs = _reset_with_state(
+        env, base_env, state_13d, goal_pos, act_hist_len, rollout_seed)
     state = model_quad.state_from_observation(raw_obs[:STATE_OBS_DIM], goal_pos=goal_pos)
 
     positions = [state[POS].copy()]
@@ -326,8 +393,9 @@ def _run_cbf_scenario(env, base_env, model_policy, cbf, model_quad, goal_pos,
 
 def _run_mpc_scenario(env, base_env, mpc, model_quad, goal_pos,
                       act_mean, act_std, max_steps, state_13d,
-                      act_hist_len):
-    obs, raw_obs = _reset_with_state(env, base_env, state_13d, goal_pos, act_hist_len)
+                      act_hist_len, rollout_seed=None):
+    obs, raw_obs = _reset_with_state(
+        env, base_env, state_13d, goal_pos, act_hist_len, rollout_seed)
     state = model_quad.state_from_observation(
         raw_obs[:STATE_OBS_DIM].astype(np.float64), goal_pos=goal_pos)
     mpc.reset(state)
@@ -590,6 +658,18 @@ def main():
                         help="Controllers to run (default: all)")
     parser.add_argument("--save_plots", action="store_true", default=False)
     parser.add_argument("--plot_dir", type=str, default=None)
+    parser.add_argument(
+        "--comparison_base_seed",
+        type=int,
+        default=None,
+        help="Base seed for per-scenario disturbance + obs-noise streams "
+             "(default: scenarios YAML comparison_base_seed or 7777).",
+    )
+    parser.add_argument(
+        "--no_sync_stochastic_seeds",
+        action="store_true",
+        help="Do not reseed between controllers (legacy: different noise per run).",
+    )
     args = parser.parse_args()
 
     scfg = _load_scenarios_config(args.scenarios_config)
@@ -610,6 +690,10 @@ def main():
     rl_cfg = scfg.get("rl_policy", {})
     act_hist_len = rl_cfg.get("action_history_len", 0)
     deterministic = rl_cfg.get("deterministic", True)
+
+    comparison_base_seed = args.comparison_base_seed
+    if comparison_base_seed is None:
+        comparison_base_seed = int(scfg.get("comparison_base_seed", 7777))
 
     if not scenarios:
         print("No scenarios defined in config."); return
@@ -645,6 +729,14 @@ def main():
 
     if act_hist_len > 0:
         env = ActionHistoryWrapper(env, act_hist_len)
+
+    if not args.no_sync_stochastic_seeds:
+        print(
+            f"  Stochastic sync: comparison_base_seed={comparison_base_seed} "
+            "(identical disturbance + obs-noise per scenario for all controllers)",
+        )
+    else:
+        print("  Stochastic sync: disabled (--no_sync_stochastic_seeds)")
 
     # CBF filter
     cbf, model_quad = None, None
@@ -722,6 +814,9 @@ def main():
         print(f"{'='*70}")
 
         ep_data = {}
+        rollout_seed = None
+        if not args.no_sync_stochastic_seeds:
+            rollout_seed = _scenario_rollout_seed(comparison_base_seed, si)
 
         for ctrl in controllers:
             print(f"  Running {ctrl} ...")
@@ -731,22 +826,22 @@ def main():
                 ep_data[ctrl] = _run_rl_scenario(
                     env, base_env, model_policy, model_quad, goal_pos,
                     act_mean, act_std, max_steps, state_13d,
-                    act_hist_len, deterministic)
+                    act_hist_len, deterministic, rollout_seed)
             elif ctrl == "RL+CBF":
                 ep_data[ctrl] = _run_cbf_scenario(
                     env, base_env, model_policy, cbf, model_quad, goal_pos,
                     act_mean, act_std, max_steps, state_13d,
-                    act_hist_len, deterministic)
+                    act_hist_len, deterministic, rollout_seed)
             elif ctrl == "MPC":
                 ep_data[ctrl] = _run_mpc_scenario(
                     env, base_env, mpc_free, model_quad_mpc, goal_pos,
                     act_mean, act_std, max_steps, state_13d,
-                    act_hist_len)
+                    act_hist_len, rollout_seed)
             elif ctrl == "MPC+Con":
                 ep_data[ctrl] = _run_mpc_scenario(
                     env, base_env, mpc_con, model_quad_mpc, goal_pos,
                     act_mean, act_std, max_steps, state_13d,
-                    act_hist_len)
+                    act_hist_len, rollout_seed)
 
             wall = time.perf_counter() - t0
             d = ep_data[ctrl]
