@@ -27,6 +27,9 @@ QuadrotorEnv::QuadrotorEnv(const std::string &cfg_path)
   dynamics.updateParams(cfg_);
   quadrotor_ptr_->updateDynamics(dynamics);
 
+  // load disturbance model (optional YAML block)
+  quadrotor_ptr_->loadDisturbanceParams(cfg_);
+
   // define a bounding box
   world_box_ << -20, 20, -20, 20, 0, 20;
   if (!quadrotor_ptr_->setWorldBox(world_box_)) {
@@ -288,6 +291,16 @@ bool QuadrotorEnv::getAct(Command *const cmd) const {
 
 void QuadrotorEnv::addObjectsToUnity(std::shared_ptr<UnityBridge> bridge) {
   bridge->addQuadrotor(quadrotor_ptr_);
+}
+
+void QuadrotorEnv::setDisturbanceParams(Ref<Vector<>> params) {
+  if (params.size() < 20) return;
+  Vector<20> p = params.head<20>();
+  quadrotor_ptr_->setDisturbanceParams(p);
+}
+
+void QuadrotorEnv::seedDisturbance(const int seed) {
+  quadrotor_ptr_->seedDisturbance(seed);
 }
 
 std::ostream &operator<<(std::ostream &os, const QuadrotorEnv &quad_env) {

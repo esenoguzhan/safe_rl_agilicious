@@ -127,6 +127,12 @@ void VecEnv<EnvBase>::setSeed(const int seed) {
 }
 
 template<typename EnvBase>
+void VecEnv<EnvBase>::seedDisturbance(const int seed) {
+  int seed_inc = seed;
+  for (int i = 0; i < num_envs_; i++) envs_[i]->seedDisturbance(seed_inc++);
+}
+
+template<typename EnvBase>
 void VecEnv<EnvBase>::getObs(Ref<MatrixRowMajor<>> obs) {
   for (int i = 0; i < num_envs_; i++) envs_[i]->getObs(obs.row(i));
 }
@@ -246,6 +252,13 @@ template<typename EnvBase>
 void VecEnv<EnvBase>::setWorldBox(Ref<Vector<>> box) {
   for (int i = 0; i < num_envs_; i++) {
     envs_[i]->setWorldBox(box);
+  }
+}
+
+template<typename EnvBase>
+void VecEnv<EnvBase>::setDisturbanceParams(Ref<Vector<>> params) {
+  for (int i = 0; i < num_envs_; i++) {
+    envs_[i]->setDisturbanceParams(params);
   }
 }
 

@@ -14,6 +14,22 @@ quadrotor_dynamics:
   kappa: 0.016 # rotor drag coeff
   omega_max: [6.0, 6.0, 6.0]  # body rate constraint (x, y, z) 
 
+disturbances:
+  enable: false
+  # Body-frame anisotropic quadratic drag coefficients [N/(m/s)^2]
+  drag_coeff: [0.01, 0.01, 0.04]
+  # World-frame constant wind velocity [m/s]
+  wind_mean: [0.0, 0.0, 0.0]
+  # Per-episode wind randomisation std [m/s] (sampled at each reset)
+  wind_var: [0.0, 0.0, 0.0]
+  # Body-frame additive force noise std [N] (per integration substep)
+  force_noise_std: [0.0, 0.0, 0.0]
+  # Body-frame additive torque noise std [N*m] (per integration substep)
+  torque_noise_std: [0.0, 0.0, 0.0]
+  # Ornstein-Uhlenbeck wind gust parameters (set ou_theta=0 to disable)
+  ou_theta: 0.0       # mean-reversion rate [1/s]
+  ou_sigma: [0.0, 0.0, 0.0]  # OU diffusion [m/s / sqrt(s)]
+
 rl:
   pos_coeff: -0.002        # reward coefficient for position 
   ori_coeff: -0.002        # reward coefficient for orientation

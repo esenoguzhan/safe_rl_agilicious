@@ -61,6 +61,8 @@ class QuadrotorEnv final : public EnvBase {
   void setWorldBox(Ref<Vector<>> box);
   bool setQuadState(Ref<Vector<>> state);
   void initHoverMotors();
+  void setDisturbanceParams(Ref<Vector<>> params);
+  void seedDisturbance(const int seed) override;
 
   // - public get functions
   bool getObs(Ref<Vector<>> obs) override;

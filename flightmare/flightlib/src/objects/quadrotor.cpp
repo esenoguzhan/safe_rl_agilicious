@@ -60,6 +60,52 @@ bool Quadrotor::run(const Scalar ctl_dt) {
     // compute body torque
     state_.tau = force_torques.segment<3>(1);
 
+    // --- Disturbance injection ---
+    if (dist_enable_) {
+      const Quaternion q_cur = state_.q();
+      const Scalar mass = dynamics_.getMass();
+
+      // OU wind gust update (world frame)
+      if (dist_ou_theta_ > 0.0) {
+        const Scalar sqrt_dt = std::sqrt(sim_dt);
+        for (int i = 0; i < 3; i++) {
+          wind_ou_state_(i) +=
+            -dist_ou_theta_ * (wind_ou_state_(i) - wind_episode_(i)) * sim_dt
+            + dist_ou_sigma_(i) * sqrt_dt * dist_normal_(dist_rng_);
+        }
+      }
+
+      // effective wind (world frame)
+      const Vector<3> wind =
+        (dist_ou_theta_ > 0.0) ? wind_ou_state_ : wind_episode_;
+
+      // air-relative velocity (world) → body for anisotropic drag
+      const Vector<3> v_rel_world = state_.v - wind;
+      const Vector<3> v_rel_body = q_cur.inverse() * v_rel_world;
+
+      // component-wise quadratic drag in body frame
+      Vector<3> f_drag_body;
+      for (int i = 0; i < 3; i++) {
+        f_drag_body(i) =
+          -dist_drag_coeff_(i) * std::abs(v_rel_body(i)) * v_rel_body(i);
+      }
+      state_.a += q_cur * f_drag_body / mass;
+
+      // body-frame force noise → world
+      const Vector<3> f_noise_body(
+        dist_force_noise_std_(0) * dist_normal_(dist_rng_),
+        dist_force_noise_std_(1) * dist_normal_(dist_rng_),
+        dist_force_noise_std_(2) * dist_normal_(dist_rng_));
+      state_.a += q_cur * f_noise_body / mass;
+
+      // body-frame torque noise
+      const Vector<3> tau_noise(
+        dist_torque_noise_std_(0) * dist_normal_(dist_rng_),
+        dist_torque_noise_std_(1) * dist_normal_(dist_rng_),
+        dist_torque_noise_std_(2) * dist_normal_(dist_rng_));
+      state_.tau += tau_noise;
+    }
+
     // dynamics integration
     integrator_ptr_->step(state_.x, sim_dt, next_state.x);
 
@@ -86,6 +132,7 @@ bool Quadrotor::reset(void) {
   state_.setZero();
   motor_omega_.setZero();
   motor_thrusts_.setZero();
+  resetDisturbanceState();
   return true;
 }
 
@@ -94,6 +141,7 @@ bool Quadrotor::reset(const QuadState &state) {
   state_ = state;
   motor_omega_.setZero();
   motor_thrusts_.setZero();
+  resetDisturbanceState();
   return true;
 }
 
@@ -265,5 +313,67 @@ bool Quadrotor::getCamera(const size_t cam_id,
 }
 
 bool Quadrotor::getCollision() const { return collision_; }
+
+// ---------- Disturbance model ----------
+
+void Quadrotor::resetDisturbanceState() {
+  if (!dist_enable_) return;
+  // sample per-episode wind = mean + var * N(0,1) per axis
+  for (int i = 0; i < 3; i++) {
+    wind_episode_(i) =
+      dist_wind_mean_(i) + dist_wind_var_(i) * dist_normal_(dist_rng_);
+  }
+  wind_ou_state_ = wind_episode_;
+}
+
+void Quadrotor::seedDisturbance(int seed) {
+  dist_rng_.seed(static_cast<std::mt19937::result_type>(
+    static_cast<std::uint32_t>(seed)));
+}
+
+bool Quadrotor::loadDisturbanceParams(const YAML::Node &cfg) {
+  if (!cfg["disturbances"]) return false;
+  const auto &d = cfg["disturbances"];
+
+  dist_enable_ = d["enable"].as<bool>(false);
+  if (!dist_enable_) return true;
+
+  auto readVec3 = [](const YAML::Node &n, const std::string &key,
+                     const Vector<3> &def) -> Vector<3> {
+    if (!n[key]) return def;
+    auto v = n[key].as<std::vector<Scalar>>();
+    return Vector<3>(v[0], v[1], v[2]);
+  };
+
+  dist_drag_coeff_ = readVec3(d, "drag_coeff", Vector<3>::Zero());
+  dist_wind_mean_ = readVec3(d, "wind_mean", Vector<3>::Zero());
+  dist_wind_var_ = readVec3(d, "wind_var", Vector<3>::Zero());
+  dist_force_noise_std_ = readVec3(d, "force_noise_std", Vector<3>::Zero());
+  dist_torque_noise_std_ = readVec3(d, "torque_noise_std", Vector<3>::Zero());
+  dist_ou_theta_ = d["ou_theta"].as<Scalar>(0.0);
+  dist_ou_sigma_ = readVec3(d, "ou_sigma", Vector<3>::Zero());
+
+  return true;
+}
+
+void Quadrotor::setDisturbanceParams(const Ref<Vector<20>> params) {
+  // Layout (20 floats):
+  //  [0]      enable (0 or 1)
+  //  [1-3]    drag_coeff  (body cx, cy, cz)
+  //  [4-6]    wind_mean   (world wx, wy, wz)
+  //  [7-9]    wind_var    (per-episode std)
+  //  [10-12]  force_noise_std  (body)
+  //  [13-15]  torque_noise_std (body)
+  //  [16]     ou_theta
+  //  [17-19]  ou_sigma
+  dist_enable_ = params(0) > 0.5;
+  dist_drag_coeff_ = params.segment<3>(1);
+  dist_wind_mean_ = params.segment<3>(4);
+  dist_wind_var_ = params.segment<3>(7);
+  dist_force_noise_std_ = params.segment<3>(10);
+  dist_torque_noise_std_ = params.segment<3>(13);
+  dist_ou_theta_ = params(16);
+  dist_ou_sigma_ = params.segment<3>(17);
+}
 
 }  // namespace flightlib

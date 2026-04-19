@@ -36,6 +36,10 @@ class EnvBase {
   virtual void updateExtraInfo();
   virtual bool isTerminalState(Scalar &reward);
 
+  /// Reseed the simulator's disturbance RNG (wind / OU / force noise draws).
+  /// Default: no-op for envs without a disturbance model.
+  virtual void seedDisturbance(const int seed) { (void)seed; }
+
   // auxilirary functions
   // Reseed the RNG used by reset() so same seed => same initial state (deterministic sim).
   inline void setSeed(const int seed) {

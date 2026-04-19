@@ -38,6 +38,8 @@ class VecEnv {
 
   // public set functions
   void setSeed(const int seed);
+  /// Reseed disturbance RNG for every sub-env (increments seed per env).
+  void seedDisturbance(const int seed);
 
   // public get functions
   void getObs(Ref<MatrixRowMajor<>> obs);
@@ -62,6 +64,7 @@ class VecEnv {
   bool setEnvGoalPositions(Ref<MatrixRowMajor<>> goals);
   void setSpawnRanges(Ref<Vector<>> ranges);
   void setWorldBox(Ref<Vector<>> box);
+  void setDisturbanceParams(Ref<Vector<>> params);
   void reinitHoverMotor(int agent_id);
   bool setQuadState(int env_id, Ref<Vector<>> state);
   void getTerminalObs(Ref<MatrixRowMajor<>> obs);

@@ -1,6 +1,10 @@
 #pragma once
 
 #include <stdlib.h>
+#include <random>
+
+// yaml
+#include <yaml-cpp/yaml.h>
 
 // flightlib
 #include "flightlib/common/command.hpp"
@@ -66,6 +70,12 @@ class Quadrotor : ObjectBase {
   inline void setSize(const Ref<Vector<3>> size) { size_ = size; };
   inline void setCollision(const bool collision) { collision_ = collision; };
 
+  // disturbance interface
+  bool loadDisturbanceParams(const YAML::Node& cfg);
+  void setDisturbanceParams(const Ref<Vector<20>> params);
+  void resetDisturbanceState();
+  void seedDisturbance(int seed);
+
  private:
   // quadrotor dynamics, integrators
   QuadrotorDynamics dynamics_;
@@ -95,6 +105,30 @@ class Quadrotor : ObjectBase {
 
   // auxiliary variables
   Matrix<3, 2> world_box_;
+
+  // --- Disturbance model ---
+  bool dist_enable_{false};
+  // body-frame anisotropic quadratic drag [N/(m/s)^2]
+  Vector<3> dist_drag_coeff_{Vector<3>::Zero()};
+  // world-frame constant wind [m/s]
+  Vector<3> dist_wind_mean_{Vector<3>::Zero()};
+  // per-episode wind randomisation std [m/s]
+  Vector<3> dist_wind_var_{Vector<3>::Zero()};
+  // body-frame additive force noise std [N]
+  Vector<3> dist_force_noise_std_{Vector<3>::Zero()};
+  // body-frame additive torque noise std [N·m]
+  Vector<3> dist_torque_noise_std_{Vector<3>::Zero()};
+  // Ornstein-Uhlenbeck wind gust parameters
+  Scalar dist_ou_theta_{0.0};
+  Vector<3> dist_ou_sigma_{Vector<3>::Zero()};
+
+  // per-episode sampled wind & OU state (world frame)
+  Vector<3> wind_episode_{Vector<3>::Zero()};
+  Vector<3> wind_ou_state_{Vector<3>::Zero()};
+
+  // RNG for disturbances
+  std::mt19937 dist_rng_{std::random_device{}()};
+  std::normal_distribution<Scalar> dist_normal_{0.0, 1.0};
 };
 
 }  // namespace flightlib
