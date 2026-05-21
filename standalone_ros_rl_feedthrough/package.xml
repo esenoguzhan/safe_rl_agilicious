@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>standalone_ros_rl_feedthrough</name>
+  <version>0.0.1</version>
+  <description>Standalone skeleton: RL policy -> agiros feedthrough_command (no changes to agilicious).</description>
+
+  <maintainer email="user@example.com">user</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <!-- Built with agilicious agiros_msgs -->
+  <depend>agiros_msgs</depend>
+</package>

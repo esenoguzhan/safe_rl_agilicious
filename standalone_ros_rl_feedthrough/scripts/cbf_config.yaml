@@ -1,0 +1,73 @@
+# CBF filter config (position barriers only).
+# Implements Cheng et al. "End-to-End Safe RL through Barrier Functions"
+# (AAAI 2019), continuous-time formulation:
+#
+#     L_f h + L_g h * u_safe >= -alpha * h     (per barrier)
+#
+# with velocity-aware half-plane barriers
+#     h(p, v) = n . p + q + kv * (n . v)       (safe iff h >= 0).
+#
+# u_safe = u_rl + u_cbf, where u_cbf minimises ||u_cbf||^2 (or
+# ||u_cbf||^2 + K_lin*sum(eps) + K_quad*sum(eps^2) when use_slack=true)
+# subject to per-motor thrust bounds (set from the deployment's action
+# affine in rl_cbf_feedthrough_core.py via CBFFilter.set_thrust_limits).
+
+cbf:
+  # Continuous-time CBF decay rate. Larger alpha = more permissive
+  # (barrier may decrease faster). 0.6 mirrors source_scripts/cbf_config.yaml.
+  alpha: 0.6
+
+  # Discrete CBF is not supported by cbf_core_lib.py (kept for parity with
+  # source_scripts/cbf_config.yaml; ignored at load time with a warning).
+  discrete_cbf: false
+
+  # UAV safety margin: shrinks each barrier's q by r_uav (paper Sec 3.1).
+  r_uav: 0.15
+
+  # Position barriers. h(p, v) = n . p + q + kv * (n . v). Safe iff h >= 0.
+  # kv > 0 => earlier intervention when approach speed (n . v) is negative.
+  position_barriers:
+    - name: ground
+      n: [0.0, 0.0, 1.0]
+      q: -1.0
+      kv: 0.5
+    - name: ceiling
+      n: [0.0, 0.0, -1.0]
+      q: 8.0
+      kv: 0.5
+    # Uncomment to add a finite x/y room. n . p + q >= 0  =>  along n, p must
+    # stay below -q. For x_min: 1*p_x + 5 >= 0  =>  p_x >= -5.
+    # - name: x_min
+    #   n: [1.0, 0.0, 0.0]
+    #   q: 5.0
+    #   kv: 1.5
+    # - name: x_max
+    #   n: [-1.0, 0.0, 0.0]
+    #   q: 5.0
+    #   kv: 1.5
+    # - name: y_min
+    #   n: [0.0, 1.0, 0.0]
+    #   q: 5.0
+    #   kv: 1.5
+    # - name: y_max
+    #   n: [0.0, -1.0, 0.0]
+    #   q: 5.0
+    #   kv: 1.5
+
+  # QP backend. 'osqp' (recommended) or 'scipy' (SLSQP fallback). 'acados' is
+  # silently downgraded to 'osqp' here (full acados backend lives in
+  # source_scripts/cbf_filter.py).
+  solver: osqp
+  max_iter: 4000
+
+  # Slack on the barrier inequality. Without slack the QP is infeasible
+  # whenever the actuator bounds cannot enforce the barrier (e.g. saturated
+  # thrust below ceiling), and the filter falls back to the raw RL action.
+  # Penalty: K_lin * sum(eps) + K_quad * sum(eps^2) (matches MPC slack form).
+  use_slack: true
+  K_lin: 1.0e6
+  K_quad: 1.0e4
+
+  # Optional: path to a non-default quadrotor_model.yaml (relative paths are
+  # resolved next to cbf_core_lib.py). null = use the bundled one.
+  quadrotor_model_path: null

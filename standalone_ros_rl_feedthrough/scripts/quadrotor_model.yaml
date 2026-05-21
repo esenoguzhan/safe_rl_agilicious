@@ -1,0 +1,25 @@
+# Parameters for the embedded QuadrotorModel used by cbf_core_lib.py.
+# Must match the model the RL policy was trained against (Flightmare /
+# source_scripts/quadrotor_model.yaml) so the CBF Lie derivatives are correct.
+
+quadrotor_model:
+  mass: 0.774                       # [kg]
+  arm_l: 0.093 #0.125                      # [m]
+  # J = (mass/12)*arm_l^2 * diag(J_xx, J_yy, J_zz). Flightmare uses (4.5, 4.5, 7).
+  inertia_scale: [4.5, 4.5, 7.0]
+
+  motor_omega_min: 150.0            # [rad/s]
+  motor_omega_max: 2800.0           # [rad/s]
+  motor_tau: 0.033                  # [s] first-order time constant
+  thrust_map: [1.562522e-6, 0.0, 0.0]  # T = a*omega^2 + b*omega + c per motor [N]
+  kappa: 0.022                      # [Nm/N]
+
+  # When true, step() applies first-order motor lag to the commanded thrust
+  # before integrating. dynamics_derivative() always uses the applied thrust
+  # (no lag) so CBF Lie derivatives are unchanged.
+  use_motor_lag: true
+
+  # Body rate limits [rad/s] (x, y, z); informational, not used by CBFFilter.
+  omega_max: [10.0, 10.0, 4.0]
+
+  gravity: -9.81                    # [m/s^2]

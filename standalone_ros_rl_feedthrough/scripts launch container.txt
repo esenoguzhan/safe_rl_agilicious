@@ -1,0 +1,80 @@
+./scripts/launch_container.sh ~/Desktop/agilicious_repo/agilicious
+
+source /opt/ros/melodic/setup.bash
+
+catkin config --cmake-args -DENABLE_ACADOS=ON
+
+
+catkin config --cmake-args -DENABLE_ACADOS=ON
+
+
+
+roslaunch agiros agisim.launch
+
+
+
+rostopic pub /angrybird/agiros_pilot/start std_msgs/Empty -1
+
+
+rostopic pub /angrybird/agiros_pilot/go_to_pose geometry_msgs/PoseStamped   "{header: {frame_id: 'world'}, pose: {position: {x: 0, y: 0, z: 4}, orientation: {w: 1, x: 0, y: 0, z: 0}}}" -1
+
+
+
+roslaunch rosbridge_server rosbridge_websocket.launch port:=9090
+
+
+python3 ~/Desktop/agilicious_repo/agilicious/agiros/agiros/src/standalone_ros_rl_feedthrough/scripts/rl_feedthrough_rosbridge_client.py   --host 127.0.0.1 --port 9090   --state-topic /angrybird/agiros_pilot/state   --cmd-topic /angrybird/agiros_pilot/feedthrough_command   --telemetry-topic /angrybird/agiros_pilot/telemetry   --model-path ~/Desktop/agilicious_repo/agilicious/PPO_55000000_seq7dec_s7_disturbances_ph500_rl50/best_model.zip   --vecnormalize-path ~/Desktop/agilicious_repo/agilicious/PPO_55000000_seq7dec_s7_disturbances_ph500_rl50/vecnormalize.pkl   --no-telemetry   --motor-perm 1,3,2,0   --fixed-goal 1 -2 6   --action-history-init 0.0   --action-clip 1.0   --action-lpf-alpha 1.0   --torque-scale 1.0 --thrust-bias 0.0   --safety-pos-err 0 --safety-bodyrate 0 --safety-tilt-cos 0   --engage-after-steps 50   --log-step-every 25   --noise-pos 0.015 --noise-vel 0.08 --noise-omega 0.0 --noise-quat 0.0
+
+
+
+
+
+export LIBGL_ALWAYS_SOFTWARE=1
+
+
+
+
+
+sudo apt-get update
+sudo apt-get install -y ros-melodic-rosbridge-suite
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+roslaunch rosbridge_server rosbridge_websocket.launch port:=9090
+
+
+
+export LIBGL_ALWAYS_SOFTWARE=1
+export QT_X11_NO_MITSHM=1
+roslaunch agiros agisim.launch
+
+
+
+touch /tmp/.docker.xauth
+xauth nlist $DISPLAY | sed -e 's/^..../ffff/' | xauth -f /tmp/.docker.xauth nmerge -
+chmod 666 /tmp/.docker.xauth   # or fix ownership so the script can write it
+
+
+
+
+
+
+python3 ~/Desktop/agilicious_repo/agilicious/agiros/agiros/src/standalone_ros_rl_feedthrough/scripts/rl_cbf_feedthrough_rosbridge_client.py   --host 127.0.0.1 --port 9090   --state-topic /angrybird/agiros_pilot/state   --cmd-topic /angrybird/agiros_pilot/feedthrough_command   --telemetry-topic /angrybird/agiros_pilot/telemetry   --no-telemetry   --model-path ~/Desktop/agilicious_repo/agilicious/PPO_55000000_seq6dec_s6_disturbances_ph500_rl50/best_model.zip   --vecnormalize-path ~/Desktop/agilicious_repo/agilicious/PPO_55000000_seq6dec_s6_disturbances_ph500_rl50/vecnormalize.pkl   --motor-perm 1,3,2,0   --fixed-goal 1 -2 10   --action-history-init 0.0   --action-clip 1.0   --action-lpf-alpha 1.0   --torque-scale 0.3   --thrust-bias 0.0   --safety-pos-err 0   --safety-bodyrate 0   --safety-tilt-cos 0   --engage-after-steps 50   --log-step-every 25   --noise-pos 0.05   --noise-vel 0.10   --noise-omega 0.10   --noise-quat 0.02   --cbf-log-every 25   --cbf-csv /tmp/cbf_trace.csv
+
+
+
+
+CBF script:
+
+python3 ~/Desktop/agilicious_repo/agilicious/agiros/agiros/src/standalone_ros_rl_feedthrough/scripts/rl_cbf_feedthrough_rosbridge_client.py   --model-path /home/oguz/Desktop/Safe_RL/safe_rl_agilicious/models/PPO_55000000_seq7dec_s7_disturbances_ph500_rl50_5   --fixed-goal 1 2 5   --log-step-every 25
+
+
+
+RL script with freefall:
+
+python3 ~/Desktop/agilicious_repo/agilicious/agiros/agiros/src/standalone_ros_rl_feedthrough/scripts/rl_feedthrough_rosbridge_client.py   --model-path /home/oguz/Desktop/Safe_RL/safe_rl_agilicious/models/PPO_55000000_seq7dec_s7_disturbances_ph500_rl50_5   --fixed-goal 1 2 5   --freefall-steps 25 --log-step-every 25 --engage-after-steps 0
+
+
+
+place the stand alone script at:
+
+/home/oguz/Desktop/agilicious_repo/agilicious/agiros/agiros/src

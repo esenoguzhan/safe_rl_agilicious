@@ -1,0 +1,23 @@
+# Pip dependencies for scripts/rl_feedthrough_node.py (install into the same Python env as rospy).
+# Example: pip install -r requirements.txt
+#
+# PyTorch: install the CPU or CUDA wheel from https://pytorch.org/ if you do not use pip's default.
+
+gymnasium>=0.29.1
+numpy>=1.23
+stable-baselines3>=2.2.0
+torch>=2.0
+
+# Host-only: rl_feedthrough_rosbridge_client.py (no catkin/rospy on host)
+roslibpy>=1.0.0
+
+# CBF feedthrough variant (rl_cbf_feedthrough_*.py + cbf_core_lib.py):
+#   - pyyaml: load cbf_config.yaml / quadrotor_model.yaml
+#   - scipy: OSQP sparse matrices + SLSQP fallback
+#   - osqp: primary QP solver for the CBF safety filter
+# acados is intentionally NOT a requirement here; the bundled cbf_core_lib.py
+# is OSQP/SciPy only. If you need acados, use the full cbf_filter.py in
+# agiros/agiros/src/source_scripts/.
+pyyaml>=5.4
+scipy>=1.9
+osqp>=0.6.3
