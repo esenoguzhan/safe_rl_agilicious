@@ -20,7 +20,7 @@ cbf:
   # Continuous-time CBF decay rate.
   # dh/dt >= -alpha*h allows exponential decrease; the CBF intervenes when the
   # RL action would cause a faster decrease. Larger alpha = more permissive.
-  alpha: 0.8
+  alpha: 0.6
 
   # Discrete CBF parameters (only used when discrete_cbf: true).
   eta: 0.01
@@ -29,35 +29,35 @@ cbf:
   integrate: "rk4"
 
   # UAV radius / safety margin (paper Sec 3.1).
-  r_uav: 0.0
+  r_uav: 0.15
 
   # Position barriers: velocity-aware h(p,v) = n'p + q + kv*(n'v). Safe iff h >= 0.
   # kv > 0: as approach speed (n'v < 0) increases, h decreases -> earlier intervention.
   position_barriers:
     - name: ground
       n: [0.0, 0.0, 1.0]
-      q: 1.0
+      q: -1.0
       kv: 0.5
     - name: ceiling
       n: [0.0, 0.0, -1.0]
       q: 8.0
       kv: 0.5
-    - name: x_min
-      n: [1.0, 0.0, 0.0]
-      q: 8.0
-      kv: 0.5
-    - name: x_max
-      n: [-1.0, 0.0, 0.0]
-      q: 8.0
-      kv: 0.5
-    - name: y_min
-      n: [0.0, 1.0, 0.0]
-      q: 8.0
-      kv: 0.5
-    - name: y_max
-      n: [0.0, -1.0, 0.0]
-      q: 8.0
-      kv: 0.5
+    # - name: x_min
+    #   n: [1.0, 0.0, 0.0]
+    #   q: 5.0
+    #   kv: 1.5
+    # - name: x_max
+    #   n: [-1.0, 0.0, 0.0]
+    #   q: 5.0
+    #   kv: 1.5
+    # - name: y_min
+    #   n: [0.0, 1.0, 0.0]
+    #   q: 5.0
+    #   kv: 1.5
+    # - name: y_max
+    #   n: [0.0, -1.0, 0.0]
+    #   q: 5.0
+    #   kv: 1.5
 
   # QP solver: "osqp", "scipy", or "acados" (HPIPM, same backend as MPC).
   # Both osqp and acados produce identical results; acados matches MPC solver.
@@ -67,8 +67,8 @@ cbf:
   # Slack variable: relaxes CBF constraint when infeasible due to actuator limits.
   # Penalty: K_lin * sum(eps) + K_quad * sum(eps^2)  (matches MPC slack formulation)
   use_slack: true
-  K_lin: 1000.0
-  K_quad: 100.0
+  K_lin: 1.0e6
+  K_quad: 1.0e4
 
   # Quadrotor model config.
   quadrotor_model_path: null

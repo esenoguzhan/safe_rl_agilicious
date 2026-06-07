@@ -174,14 +174,21 @@ class MPCController:
         pos_max: Optional[np.ndarray] = None,
         constrained: bool = True,
         solver_label: str = "",
+        thrust_limits: Optional[tuple] = None,
     ):
         """
         Parameters
         ----------
-        pos_min, pos_max : optional (3,) arrays overriding config pos constraints
-        constrained : if False, position state constraints are disabled entirely
+        pos_min, pos_max : optional (3,) arrays; only the z components (index 2) are
+            used for state box constraints. x,y are not constrained in the OCP.
+        constrained : if False, z (and all position) state box constraints are disabled
         solver_label : appended to codegen directory name to allow multiple
                        solver variants (e.g. "free" vs "constrained")
+        thrust_limits : optional (thrust_min, thrust_max) tuple in [N] per motor.
+            Overrides the physical limits derived from the thrust-map formula.
+            Pass ``effective_thrust_limits(scfg)`` from ``_action_scaling`` to
+            align the MPC feasible set with the range actually deliverable
+            through the Flightmare normalised-action interface.
         """
         mpc_cfg = _load_mpc_config(mpc_config_path)
 
@@ -200,6 +207,13 @@ class MPCController:
         self._thrust_min = dyn_params["thrust_min"]
         self._thrust_max = dyn_params["thrust_max"]
 
+        # Override thrust limits with effective interface range if provided.
+        if thrust_limits is not None:
+            t_min, t_max = float(thrust_limits[0]), float(thrust_limits[1])
+            if t_max > t_min:
+                self._thrust_min = t_min
+                self._thrust_max = t_max
+
         # Hover thrust per motor
         self._u_hover = np.full(INPUT_DIM, (-self._mass * self._gravity) / 4.0)
 
@@ -211,15 +225,17 @@ class MPCController:
         R_diag = np.array(mpc_cfg.get("R", [0.01, 0.01, 0.01, 0.01]))
         terminal_w = float(mpc_cfg.get("terminal_weight", 5.0))
 
-        # Position constraints (overridable via constructor)
+        # z-only position box (indices [2]); x,y entries kept for config/API compatibility
         if pos_min is not None:
             self._pos_min = np.asarray(pos_min, dtype=np.float64).ravel()[:3]
         else:
-            self._pos_min = np.array(mpc_cfg.get("pos_min", [-20., -20., 0.]))
+            self._pos_min = np.array(mpc_cfg.get("pos_min", [-20., -20., 0.]), dtype=np.float64)
         if pos_max is not None:
             self._pos_max = np.asarray(pos_max, dtype=np.float64).ravel()[:3]
         else:
-            self._pos_max = np.array(mpc_cfg.get("pos_max", [20., 20., 20.]))
+            self._pos_max = np.array(mpc_cfg.get("pos_max", [20., 20., 20.]), dtype=np.float64)
+        self._z_lbx = float(self._pos_min[2])
+        self._z_ubx = float(self._pos_max[2])
 
         # Solver settings
         nlp_solver = mpc_cfg.get("nlp_solver", "SQP_RTI")
@@ -272,28 +288,28 @@ class MPCController:
         ocp.constraints.ubu = np.full(INPUT_DIM, self._thrust_max)
         ocp.constraints.idxbu = np.arange(INPUT_DIM)
 
-        # -- State constraints on position (indices 0,1,2) --
+        # -- State box on z only (index 2); same ground/ceiling as CBF when barriers + r_uav are aligned
         self._use_slack = bool(mpc_cfg.get("use_slack", False))
         self._K_lin = float(mpc_cfg.get("K_lin", 1e6))
         self._K_quad = float(mpc_cfg.get("K_quad", 0.0))
         if self._constrained:
-            n_pos = 3
-            ocp.constraints.lbx = self._pos_min
-            ocp.constraints.ubx = self._pos_max
-            ocp.constraints.idxbx = np.array([0, 1, 2])
-            ocp.constraints.lbx_e = self._pos_min
-            ocp.constraints.ubx_e = self._pos_max
-            ocp.constraints.idxbx_e = np.array([0, 1, 2])
+            n_pos = 1
+            zmin = np.array([self._z_lbx], dtype=np.float64)
+            zmax = np.array([self._z_ubx], dtype=np.float64)
+            ocp.constraints.lbx = zmin
+            ocp.constraints.ubx = zmax
+            ocp.constraints.idxbx = np.array([2], dtype=int)
+            ocp.constraints.lbx_e = zmin
+            ocp.constraints.ubx_e = zmax
+            ocp.constraints.idxbx_e = np.array([2], dtype=int)
 
             if self._use_slack:
-                # Soften all 3 position state-box constraints (path stages)
-                ocp.constraints.idxsbx = np.array([0, 1, 2])
+                ocp.constraints.idxsbx = np.array([0], dtype=int)
                 ocp.cost.zl = self._K_lin * np.ones(n_pos)
                 ocp.cost.zu = self._K_lin * np.ones(n_pos)
                 ocp.cost.Zl = self._K_quad * np.ones(n_pos)
                 ocp.cost.Zu = self._K_quad * np.ones(n_pos)
-                # Soften terminal stage too
-                ocp.constraints.idxsbx_e = np.array([0, 1, 2])
+                ocp.constraints.idxsbx_e = np.array([0], dtype=int)
                 ocp.cost.zl_e = self._K_lin * np.ones(n_pos)
                 ocp.cost.zu_e = self._K_lin * np.ones(n_pos)
                 ocp.cost.Zl_e = self._K_quad * np.ones(n_pos)

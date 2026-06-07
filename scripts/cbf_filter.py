@@ -773,6 +773,16 @@ class CBFFilter:
     def model(self) -> QuadrotorModel:
         return self._model
 
+    def set_thrust_limits(self, thrust_min: float, thrust_max: float) -> None:
+        """Override per-motor thrust bounds on the internal QuadrotorModel.
+
+        Call with ``effective_thrust_limits(scfg)`` from ``_action_scaling`` to
+        align the CBF feasible set with the range actually deliverable through
+        the Flightmare normalised-action interface.  The updated limits affect
+        both the QP box constraints in ``filter()`` and ``clamp_motor_thrusts``.
+        """
+        self._model.set_thrust_limits(thrust_min, thrust_max)
+
     @property
     def barriers(self) -> List[HOCBFBarrier]:
         return list(self._barriers)

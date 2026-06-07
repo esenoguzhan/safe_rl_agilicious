@@ -160,6 +160,20 @@ class QuadrotorModel:
         """Per-motor thrust bounds (min, max) in [N]."""
         return (self._thrust_min, self._thrust_max)
 
+    def set_thrust_limits(self, thrust_min: float, thrust_max: float) -> None:
+        """Override per-motor thrust bounds (min, max) in [N].
+
+        Use this to align MPC/CBF feasible sets with the Flightmare step
+        interface, whose effective range is determined by the nominal action
+        scaling rather than the physical motor limits.
+        """
+        if thrust_max <= thrust_min:
+            raise ValueError(
+                f"thrust_max ({thrust_max}) must be > thrust_min ({thrust_min})"
+            )
+        self._thrust_min = float(thrust_min)
+        self._thrust_max = float(thrust_max)
+
     def get_omega_max(self) -> np.ndarray:
         """Body rate limits (rad/s) [x, y, z]."""
         return self._omega_max.copy()

@@ -11,6 +11,7 @@ from typing import Optional, Union
 
 import numpy as np
 
+from scripts._action_scaling import flightmare_applied_thrusts
 from scripts.cbf_filter import CBFFilter
 from scripts.quadrotor_model import QuadrotorModel, STATE_DIM
 
@@ -68,6 +69,18 @@ class CBFWrapper:
             self._act_mean = np.full(4, (mass * g) / 4.0, dtype=np.float32)
             self._act_std = np.full(4, (mass * 2 * g) / 4.0, dtype=np.float32)
 
+        # Align the CBF QP box constraints with the per-motor thrust range
+        # that Flightmare can actually deliver through the normalised-action
+        # interface: thrust = clip(action, -1, 1) * act_std + act_mean, then
+        # clamped to >= 0. Without this the CBF would plan thrusts up to the
+        # physical motor ceiling (~12.25 N) that the env never applies.
+        mean64 = self._act_mean.astype(np.float64)
+        std64 = self._act_std.astype(np.float64)
+        t_min = float(max(0.0, np.min(mean64 - std64)))
+        t_max = float(np.max(mean64 + std64))
+        if t_max > t_min:
+            self._cbf.set_thrust_limits(t_min, t_max)
+
         self._pending_actions = None
 
     @property
@@ -115,7 +128,12 @@ class CBFWrapper:
             ob = obs[i].ravel()[:13]
             goal_i = self._goal_pos[i]
             state = self._cbf.model.state_from_observation(ob, goal_pos=goal_i)
-            u_rl = actions[i, :4].astype(np.float64) * self._act_std.astype(np.float64) + self._act_mean.astype(np.float64)
+            # Feed the CBF the thrust Flightmare will actually apply (clip
+            # action to [-1, 1], denormalise, clamp negative motor thrusts
+            # to 0) so the QP corrects against the real plant input.
+            u_rl = flightmare_applied_thrusts(
+                actions[i], self._act_mean, self._act_std
+            )
             u_safe = self._cbf.filter(state, u_rl)
             anorm = (u_safe.astype(np.float32) - self._act_mean) / (self._act_std + 1e-8)
             safe_actions[i, :4] = np.clip(anorm, -1.0, 1.0)

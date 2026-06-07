@@ -1,0 +1,215 @@
+# 1000 Hz physics (sim_dt), 100 Hz RL: use scripts/train_v3_decimated_physics.py (or curriculum
+# runner). Episode length is RL steps: max_t * rl_hz = 20 s * 100 = 2000.
+env:
+  max_episode_steps: 2000
+  vec_env:
+    seed: 1
+    scene_id: 0
+    num_envs: 25
+    num_threads: 8
+    render: false
+  quadrotor_env:
+    sim_dt: 0.001
+    max_t: 20.0
+  quadrotor_dynamics:
+    mass: 0.774
+    arm_l: 0.125
+    motor_omega_min: 150.0
+    motor_omega_max: 2800.0
+    motor_tau: 0.033
+    thrust_map:
+    - 1.562522e-06
+    - 0.0
+    - 0.0
+    kappa: 0.022
+    omega_max:
+    - 10.0
+    - 10.0
+    - 4.0
+  motor_init: zero
+  goal_position:
+  - 0.0
+  - 0.0
+  - 1.0
+  world_box:
+  - -30
+  - 30
+  - -30
+  - 30
+  - 0
+  - 30
+  spawn_ranges:
+    pos_x:
+    - -4.0
+    - 4.0
+    pos_y:
+    - -4.0
+    - 4.0
+    pos_z:
+    - 1.0
+    - 8.0
+    vel_x:
+    - -4.0
+    - 4.0
+    vel_y:
+    - -4.0
+    - 4.0
+    vel_z:
+    - -4.0
+    - 4.0
+    ang_vel_x:
+    - -5.0
+    - 5.0
+    ang_vel_y:
+    - -5.0
+    - 5.0
+    ang_vel_z:
+    - -5.0
+    - 5.0
+    ori_scale: 1.0
+  domain_randomization:
+    enabled: true
+    randomize_mass: false
+    randomize_motor_tau: false
+    randomize_goal: true
+    mass_range:
+    - 0.6
+    - 0.95
+    motor_tau_range:
+    - 0.02
+    - 0.08
+    goal_pos_range:
+      x:
+      - -4.0
+      - 4.0
+      y:
+      - -4.0
+      - 4.0
+      z:
+      - 0.5
+      - 8.0
+  action_history_len: 5
+  observation_noise:
+    position: 0.015
+    velocity: 0.08
+  disturbances:
+    enable: false
+    drag_coeff:
+    - 0.03
+    - 0.03
+    - 0.07
+    wind_mean:
+    - 5.0
+    - 2.0
+    - 0.0
+    wind_var:
+    - 2.5
+    - 1.5
+    - 0.1
+    force_noise_std:
+    - 0.08
+    - 0.08
+    - 0.12
+    torque_noise_std:
+    - 0.035
+    - 0.035
+    - 0.008
+    ou_theta: 1.2
+    ou_sigma:
+    - 0.6
+    - 0.6
+    - 0.2
+  custom_reward:
+    enabled: true
+    mode: cauchy
+    cauchy_scale: 0.5
+    cauchy_scale_wide: 0.05
+    cauchy_scale_sharp: 1.0
+    cauchy_wide_weight: 0.6
+    cauchy_sharp_weight: 0.4
+    x_goal:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    act_goal:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    rew_state_weight:
+    - 1.5
+    - 1.5
+    - 2.0
+    - 0.3
+    - 0.3
+    - 0.3
+    - 0.3
+    - 0.1
+    - 0.1
+    - 0.1
+    - 0.1
+    - 0.1
+    - 0.1
+    rew_act_weight:
+    - 0.003
+    - 0.003
+    - 0.003
+    - 0.003
+    rew_act_rate_weight:
+    - 0.05
+    - 0.05
+    - 0.05
+    - 0.05
+    goal_approach_weight: 0.05
+    goal_approach_eps: 1.0e-06
+    l1_pos_penalty: 0.0
+    crash_penalty: -10.0
+    max_pos_error: 30.0
+ppo:
+  learning_rate: 0.0005
+  n_steps: 4096
+  batch_size: 4096
+  n_epochs: 5
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.001
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  policy_kwargs:
+    net_arch:
+      pi:
+      - 256
+      - 256
+      vf:
+      - 512
+      - 512
+training:
+  total_timesteps: 50000000
+  log_interval: 1
+  save_interval: 100000
+  eval_freq: 20000
+  seed: 0
+  normalize_obs: true
+  normalize_reward: false
+  record_episode_statistics_deque_size: 100
+evaluation:
+  n_episodes: 200
+  max_episode_steps: 2000
+  render: false
+  deterministic: true
+paths:
+  log_dir: models/PPO_30000000_cauchy_w0.6_sh0.4__dist_dr_mass_tau
+  save_dir: models/PPO_30000000_cauchy_w0.6_sh0.4__dist_dr_mass_tau
+  checkpoint_path: models/single_stage_cauchy/ppo_drone_final.zip
+  plot_dir: val_plots
