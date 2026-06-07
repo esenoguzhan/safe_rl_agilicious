@@ -48,8 +48,8 @@ VECNORM_MIN_VAR = 0.01  # minimum variance for all obs dims when loading VecNorm
 
 # Episode success for logging and train_v3 (full horizon + return threshold)
 SUCCESS_EPISODE_LENGTH = 1000
-SUCCESS_MIN_REWARD = 950.0
-SUCCESS_STOP_THRESHOLD = 0.85  # early stop after 3 consecutive evals at/above this rate
+SUCCESS_MIN_REWARD = 1860.0
+SUCCESS_STOP_THRESHOLD = 0.80  # early stop after 3 consecutive evals at/above this rate
 
 # PPO lr / ent_coef by eval success rate band (train_v3 success-schedule evals)
 V3_LR_ENT_DISCOVERY = (5e-4, 0.01)
@@ -84,42 +84,6 @@ def unwrap_vec_record_episode_statistics(venv):
             return cur
         cur = getattr(cur, "venv", None)
     return None
-
-
-def eval_success_rate_on_vec_env(model, vec_env, n_episodes, deterministic=True):
-    """Roll out n_episodes completions on vec_env; return fraction meeting episode_success."""
-    n = vec_env.num_envs
-    obs = vec_env.reset()
-    if isinstance(obs, tuple):
-        obs = obs[0]
-    ep_returns = np.zeros(n, dtype=np.float64)
-    ep_lens = np.zeros(n, dtype=np.int64)
-    completed = 0
-    successes = 0
-    while completed < n_episodes:
-        action, _ = model.predict(obs, deterministic=deterministic)
-        out = vec_env.step(action)
-        if len(out) == 5:
-            obs, rewards, terminated, truncated, infos = out
-            dones = np.logical_or(
-                np.asarray(terminated), np.asarray(truncated)
-            )
-        else:
-            obs, rewards, dones, infos = out
-        rewards = np.asarray(rewards, dtype=np.float64)
-        dones = np.asarray(dones)
-        ep_returns += rewards
-        ep_lens += 1
-        for i in range(n):
-            if dones[i]:
-                if episode_success(ep_lens[i], ep_returns[i]):
-                    successes += 1
-                completed += 1
-                ep_returns[i] = 0.0
-                ep_lens[i] = 0
-                if completed >= n_episodes:
-                    break
-    return successes / float(max(n_episodes, 1))
 
 
 def _clamp_vecnorm_obs_variance(venv, min_var=VECNORM_MIN_VAR):
@@ -421,31 +385,67 @@ def main():
         return None
 
     class EvalWithNormCallback(EvalCallback):
-        """EvalCallback that saves VecNormalize alongside best_model.zip.
-        Uses fixed eval seed (np.random + C++ env) for reproducible evaluations."""
+        """EvalCallback that saves best_model.zip + vecnormalize.pkl ONLY when the eval
+        success rate (per ``episode_success``) strictly improves over the best so far.
+
+        Mean-reward improvement is intentionally ignored as a save trigger; the parent's
+        automatic best-model saving is disabled and replaced with success-rate gating.
+        Uses a fixed eval seed (np.random + C++ env) for reproducible evaluations.
+        """
 
         def __init__(self, eval_env, best_model_save_path, log_path,
                      eval_freq, n_eval_episodes, deterministic, vecnorm_cb,
                      eval_seed=EVAL_SEED):
             super().__init__(
-                eval_env, best_model_save_path=best_model_save_path,
+                eval_env, best_model_save_path=None,
                 log_path=log_path, eval_freq=eval_freq,
                 n_eval_episodes=n_eval_episodes, deterministic=deterministic,
             )
+            self._best_save_path = best_model_save_path
             self._vecnorm_cb = vecnorm_cb
             self._eval_seed = eval_seed
             self._base_eval_env = _unwrap_to_flightlib(eval_env)
+            self.best_success_rate = -1.0
+            self.last_eval_success_rate = None  # set after each EvalCallback rollout (for schedule)
+            if self._best_save_path is not None:
+                os.makedirs(self._best_save_path, exist_ok=True)
 
         def _on_step(self):
+            self.last_eval_success_rate = None
             is_eval_step = (self.eval_freq > 0 and self.n_calls % self.eval_freq == 0)
             if is_eval_step and self._eval_seed is not None:
                 np.random.seed(self._eval_seed)
                 if self._base_eval_env is not None:
                     self._base_eval_env.set_seed(self._eval_seed)
-            prev_best = self.best_mean_reward
             result = super()._on_step()
-            if self.best_mean_reward > prev_best and self._vecnorm_cb is not None:
-                self._vecnorm_cb.save_vecnormalize()
+            if is_eval_step and self.evaluations_results and self.evaluations_length:
+                ep_rewards = self.evaluations_results[-1]
+                ep_lengths = self.evaluations_length[-1]
+                n = max(len(ep_rewards), 1)
+                successes = sum(
+                    1 for L, R in zip(ep_lengths, ep_rewards) if episode_success(L, R)
+                )
+                success_rate = successes / float(n)
+                self.last_eval_success_rate = success_rate
+                if success_rate > self.best_success_rate:
+                    prev = self.best_success_rate
+                    self.best_success_rate = success_rate
+                    if self._best_save_path is not None:
+                        self.model.save(os.path.join(self._best_save_path, "best_model"))
+                    if self._vecnorm_cb is not None:
+                        self._vecnorm_cb.save_vecnormalize()
+                    if self.verbose > 0:
+                        print(
+                            f"[train_v3] Eval success rate {success_rate:.1%} > previous best "
+                            f"{max(prev, 0.0):.1%} → saved best_model.zip"
+                            + (" + vecnormalize.pkl" if self._vecnorm_cb is not None else "")
+                        )
+                elif self.verbose > 0:
+                    print(
+                        f"[train_v3] Eval success rate {success_rate:.1%} ≤ best "
+                        f"{self.best_success_rate:.1%} → not saving"
+                    )
+                self.logger.record("eval/best_save_success_rate", self.best_success_rate)
             return result
 
     class SuccessRateLoggingCallback(BaseCallback):
@@ -472,13 +472,15 @@ def main():
             return True
 
     class SuccessScheduleV3Callback(BaseCallback):
-        """Set LR/ent from eval success band each schedule eval; stop after 3 evals >= SUCCESS_STOP_THRESHOLD."""
+        """Set LR/ent from eval success band each schedule eval; stop after 3 evals >= SUCCESS_STOP_THRESHOLD.
 
-        def __init__(self, eval_env, eval_freq, n_eval_episodes, verbose=0):
+        Uses the same eval rollout as ``EvalWithNormCallback`` (must run after it in the callback list).
+        """
+
+        def __init__(self, eval_with_norm_cb, eval_freq, verbose=0):
             super().__init__(verbose)
-            self.eval_env = eval_env
+            self._eval_cb = eval_with_norm_cb
             self.eval_freq = int(eval_freq)
-            self.n_eval_episodes = int(n_eval_episodes)
             self._consecutive_at_stop_thr = 0
             self._lr = None
             self._ent = None
@@ -491,13 +493,9 @@ def main():
         def _on_step(self) -> bool:
             if self.eval_freq <= 0 or self.n_calls % self.eval_freq != 0:
                 return True
-            np.random.seed(EVAL_SEED)
-            base_ev = _unwrap_to_flightlib(self.eval_env)
-            if base_ev is not None:
-                base_ev.set_seed(EVAL_SEED)
-            rate = eval_success_rate_on_vec_env(
-                self.model, self.eval_env, self.n_eval_episodes, deterministic=True
-            )
+            rate = self._eval_cb.last_eval_success_rate
+            if rate is None:
+                return True
             self.logger.record("eval/success_rate", rate)
             target_lr, target_ent = v3_lr_ent_for_success_rate(rate)
             if target_lr != self._lr or target_ent != self._ent:
@@ -597,6 +595,15 @@ def main():
     eval_cfg = cfg.get("evaluation", {})
     n_eval_episodes = eval_cfg.get("n_episodes", 5)
 
+    eval_with_norm_cb = EvalWithNormCallback(
+        eval_env,
+        best_model_save_path=run_dir,
+        log_path=run_dir,
+        eval_freq=eval_freq,
+        n_eval_episodes=n_eval_episodes,
+        deterministic=True,
+        vecnorm_cb=vecnorm_cb,
+    )
     callbacks = [
         vecnorm_cb,
         CheckpointWithNormCallback(
@@ -605,20 +612,11 @@ def main():
             name_prefix="ppo_drone",
             vecnorm_cb=vecnorm_cb,
         ),
-        EvalWithNormCallback(
-            eval_env,
-            best_model_save_path=run_dir,
-            log_path=run_dir,
-            eval_freq=eval_freq,
-            n_eval_episodes=n_eval_episodes,
-            deterministic=True,
-            vecnorm_cb=vecnorm_cb,
-        ),
+        eval_with_norm_cb,
         SuccessRateLoggingCallback(log_freq=eval_freq, window=min(100, record_deque_size)),
         SuccessScheduleV3Callback(
-            eval_env,
+            eval_with_norm_cb,
             eval_freq=eval_freq,
-            n_eval_episodes=n_eval_episodes,
             verbose=1,
         ),
     ]

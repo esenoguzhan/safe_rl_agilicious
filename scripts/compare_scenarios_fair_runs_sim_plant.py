@@ -41,7 +41,8 @@ Outputs (default ``--plot_dir``)::
     compare_fair_runs_sim_plant_log_*.txt
     <comparison_runs name>/            # e.g. nominal, mass_mismatch_sim
       <scenario_name>/                 # sanitized scenario name
-        metrics_*.png                  # per-scenario plots
+        rollout_data.pkl               # trajectories for all seeds/controllers (replay plots)
+        metrics_<Controller>_*.png     # per-controller metric PNGs (with --save_plots)
 
 Usage:
   python scripts/compare_scenarios_fair_runs_sim_plant.py \\
@@ -101,15 +102,43 @@ def _copy_run_configs(plot_dir: str, scenarios_config: str, model_config_yaml: O
 
 
 def _scfg_with_quadrotor_overrides(scfg: Dict[str, Any], run_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Deep copy `scfg` and merge `run_cfg['quadrotor_overrides']` into `quadrotor`."""
+    """Deep copy ``scfg`` and merge ``run_cfg['quadrotor_overrides']`` into ``quadrotor``.
+
+    Mass overrides are handled specially: they are *not* merged into the
+    Flightmare env construction YAML. Doing so would rescale action
+    denormalization (``act_mean_`` / ``act_std_``) in the C++ env constructor
+    and hide the effect of mass mismatch. Instead we:
+
+      - Snapshot the pre-override ``quadrotor.mass`` as ``_nominal_action_mass``
+        so downstream Python ``act_mean`` / ``act_std`` stay pinned to the
+        nominal training-time mass.
+      - Store the override value as ``_sim_mass_override``; the fair-runs
+        runner applies it post-construction via ``setEnvMasses`` so only the
+        simulator dynamics change.
+
+    All other overrides (e.g. ``motor_tau``) are merged into ``quadrotor`` as
+    before.
+    """
     run_scfg = copy.deepcopy(scfg)
+    # Always record the nominal (pre-override) action mass so downstream
+    # helpers can look it up unambiguously.
+    base_q = run_scfg.get("quadrotor") or {}
+    if "mass" in base_q:
+        run_scfg["_nominal_action_mass"] = float(base_q["mass"])
+
     overrides = run_cfg.get("quadrotor_overrides")
     if not overrides:
         return run_scfg
-    q = dict(run_scfg.get("quadrotor") or {})
-    for k, v in overrides.items():
-        q[k] = v
-    run_scfg["quadrotor"] = q
+
+    remaining_overrides = dict(overrides)
+    if "mass" in remaining_overrides:
+        run_scfg["_sim_mass_override"] = float(remaining_overrides.pop("mass"))
+
+    if remaining_overrides:
+        q = dict(run_scfg.get("quadrotor") or {})
+        for k, v in remaining_overrides.items():
+            q[k] = v
+        run_scfg["quadrotor"] = q
     return run_scfg
 
 
@@ -123,12 +152,28 @@ def _run_one_comparison_run(
     run_scfg = _scfg_with_quadrotor_overrides(scfg, run_cfg)
     qo = run_cfg.get("quadrotor_overrides") or {}
     if qo:
-        q = run_scfg.get("quadrotor") or {}
+        merged_q = run_scfg.get("quadrotor") or {}
+        sim_mass_override = run_scfg.get("_sim_mass_override")
+        effective_sim_mass = (
+            float(sim_mass_override)
+            if sim_mass_override is not None
+            else merged_q.get("mass")
+        )
+        nominal_action_mass = run_scfg.get(
+            "_nominal_action_mass",
+            merged_q.get("mass"),
+        )
         print(
-            "  Simulation plant (merged quadrotor:): "
-            f"mass={q.get('mass')}, motor_tau={q.get('motor_tau')} "
+            "  Simulation plant: "
+            f"mass={effective_sim_mass}, motor_tau={merged_q.get('motor_tau')} "
             f"(overrides applied: {qo})",
         )
+        if sim_mass_override is not None:
+            print(
+                "  Action scaling (frozen) uses nominal mass "
+                f"{nominal_action_mass} kg (sim-plant mass override "
+                f"{sim_mass_override} kg applied via setEnvMasses after env build).",
+            )
     return fr._run_one_comparison_run(run_idx, run_cfg, run_scfg, args, temp_files)
 
 
@@ -187,6 +232,11 @@ def main() -> None:
         "--no_recompile_cbf",
         action="store_true",
         help="Reuse existing acados slack CBF .so if present (faster iterative runs).",
+    )
+    parser.add_argument(
+        "--no-save-rollouts",
+        action="store_true",
+        help="Do not write rollout_data.pkl per scenario (default: save).",
     )
     args = parser.parse_args()
 

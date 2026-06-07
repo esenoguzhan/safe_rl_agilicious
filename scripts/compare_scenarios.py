@@ -33,6 +33,12 @@ _REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from scripts._action_scaling import (
+    effective_thrust_limits,
+    flightmare_applied_thrusts,
+    nominal_act_scaling,
+    nominal_action_mass,
+)
 from scripts.config_loader import load_config, prepare_env_run_dir, write_env_configs
 from scripts.context import flightmare_context
 from scripts.custom_reward_wrapper import CustomRewardWrapper
@@ -41,9 +47,13 @@ from scripts.env_wrapper import (
     ActionHistoryWrapper,
     ObservationNoiseWrapper,
 )
-from scripts.cbf_filter import CBFFilter
+from scripts.cbf_filter import CBFFilter, _load_cbf_config
 from scripts.quadrotor_model import POS, ATT, VEL, OME, QuadrotorModel, STATE_DIM
-from scripts.mpc_controller import MPCController
+from scripts.mpc_barrier_bounds import (
+    barriers_to_mpc_z_interval,
+    mpc_pos_vectors_from_z,
+)
+from scripts.mpc_controller import MPCController, _load_mpc_config
 
 STATE_OBS_DIM = 13
 
@@ -323,7 +333,8 @@ def _run_rl_scenario(env, base_env, model_policy, model_quad, goal_pos,
         action, _ = model_policy.predict(
             obs.reshape(1, -1), deterministic=deterministic)
         action = action.ravel()
-        u_raw = action[:4].astype(np.float64) * act_std + act_mean
+        # Mirror Flightmare: clip action to [-1, 1], denormalise, clamp negatives to 0.
+        u_raw = flightmare_applied_thrusts(action, act_mean, act_std)
         actions.append(u_raw.copy())
 
         obs_out, reward, dones, infos = env.step(action.reshape(1, -1))
@@ -358,7 +369,10 @@ def _run_cbf_scenario(env, base_env, model_policy, cbf, model_quad, goal_pos,
         action, _ = model_policy.predict(
             obs.reshape(1, -1), deterministic=deterministic)
         action = action.ravel()
-        u_raw = action[:4].astype(np.float64) * act_std + act_mean
+        # Feed the CBF the thrust Flightmare will actually apply (clip to
+        # [-1, 1], denormalise, clamp negatives to 0) so the QP corrects
+        # against the real plant input instead of an unclipped ghost action.
+        u_raw = flightmare_applied_thrusts(action, act_mean, act_std)
 
         u_safe = cbf.filter(state, u_raw)
         if cbf.last_qp_failed:
@@ -702,12 +716,14 @@ def main():
     if needs_rl and checkpoint is None:
         parser.error("--checkpoint required for RL controllers")
 
-    # Quadrotor dynamics
-    qd = scfg.get("quadrotor", {})
-    mass = float(qd.get("mass", 0.774))
-    g = 9.81
-    act_mean = np.full(4, (mass * g) / 4.0, dtype=np.float64)
-    act_std = np.full(4, (mass * 2 * g) / 4.0, dtype=np.float64)
+    # Quadrotor dynamics — action scaling is pinned to the *nominal* mass so
+    # sim-plant mass overrides / DR only affect simulator dynamics.
+    nominal_mass = nominal_action_mass(scfg)
+    act_mean, act_std = nominal_act_scaling(scfg, dtype=np.float64)
+    print(
+        f"  Action scaling (frozen): nominal_mass={nominal_mass:.4f} kg, "
+        f"act_mean={act_mean[0]:.4f} N, act_std={act_std[0]:.4f} N",
+    )
 
     # Build environment
     print("Creating environment ...")
@@ -738,6 +754,9 @@ def main():
     else:
         print("  Stochastic sync: disabled (--no_sync_stochastic_seeds)")
 
+    # Effective per-motor thrust limits matching the Flightmare env.step interface.
+    eff_t_min, eff_t_max = effective_thrust_limits(scfg)
+
     # CBF filter
     cbf, model_quad = None, None
     if "RL+CBF" in controllers or needs_rl:
@@ -746,10 +765,12 @@ def main():
         if args.cbf_config is not None:
             cbf_kwargs["config_path"] = args.cbf_config
         cbf = CBFFilter(**cbf_kwargs)
+        cbf.set_thrust_limits(eff_t_min, eff_t_max)
         model_quad = cbf.model
 
     if model_quad is None:
         model_quad = QuadrotorModel()
+        model_quad.set_thrust_limits(eff_t_min, eff_t_max)
 
     # RL policy
     model_policy = None
@@ -769,29 +790,31 @@ def main():
     # MPC controllers
     mpc_free, mpc_con, model_quad_mpc = None, None, None
     if needs_mpc:
-        bnd = _barriers_to_axis_bounds(barriers)
-        pos_min = np.array([
-            bnd.get("x", (-20, 20))[0] or -20,
-            bnd.get("y", (-20, 20))[0] or -20,
-            bnd.get("z", (0, 20))[0] or 0,
-        ])
-        pos_max = np.array([
-            bnd.get("x", (-20, 20))[1] or 20,
-            bnd.get("y", (-20, 20))[1] or 20,
-            bnd.get("z", (0, 20))[1] or 20,
-        ])
+        r_uav = 0.0
+        try:
+            r_uav = float(_load_cbf_config(args.cbf_config).get("r_uav", 0.0))
+        except (OSError, KeyError, TypeError, yaml.YAMLError, ValueError):
+            r_uav = 0.0
+        mpc_ref = _load_mpc_config(args.mpc_config)
+        dz = (float(mpc_ref["pos_min"][2]), float(mpc_ref["pos_max"][2]))
+        z_lo, z_hi = barriers_to_mpc_z_interval(barriers, r_uav, default_z=dz)
+        pos_min, pos_max = mpc_pos_vectors_from_z(z_lo, z_hi)
         model_quad_mpc = QuadrotorModel()
+        model_quad_mpc.set_thrust_limits(eff_t_min, eff_t_max)
 
         if "MPC" in controllers:
             print("Building MPC solver (free) ...")
             mpc_free = MPCController(
                 mpc_config_path=args.mpc_config, constrained=False,
-                solver_label="free")
+                solver_label="free", thrust_limits=(eff_t_min, eff_t_max))
         if "MPC+Con" in controllers:
-            print("Building MPC solver (constrained) ...")
+            print(
+                f"Building MPC solver (constrained, z in [{z_lo:.3g}, {z_hi:.3g}], r_uav={r_uav}) ...",
+            )
             mpc_con = MPCController(
                 mpc_config_path=args.mpc_config, pos_min=pos_min,
-                pos_max=pos_max, constrained=True, solver_label="con")
+                pos_max=pos_max, constrained=True, solver_label="con_z",
+                thrust_limits=(eff_t_min, eff_t_max))
 
     if save_plots:
         os.makedirs(plot_dir, exist_ok=True)
