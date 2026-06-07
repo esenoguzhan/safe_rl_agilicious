@@ -1,0 +1,70 @@
+# Curriculum definition for scripts/run_curriculum.py
+#
+# The runner trains the base config first, then applies each stage's `overrides`
+# cumulatively (deep-merged) on top of the base config. Stage k's config = base
+# config + overrides of stages 1..k. Add/remove/reorder stages freely here — no
+# code changes are needed.
+#
+# Schema:
+#   run_name_prefix: <str>                # optional; used in run/model folder names
+#   base_config: configs/<file>.yaml      # optional; --base-config CLI flag overrides this
+#   stages:
+#     - name: <str>                       # required; sanitized into the run name
+#       description: <str>                # optional; printed in the stage summary
+#       overrides: { ... }                # optional; deep-merged onto the cumulative config
+
+run_name_prefix: seq7dec
+base_config: configs/ppo_config_base.yaml
+
+stages:
+  - name: base
+    description: "Base config as-is (no parameter change)."
+
+  - name: spawn_pos
+    description: "Widen position spawn ranges (x,y +/-8 m; z 0.5-8 m)."
+    overrides:
+      env:
+        spawn_ranges:
+          pos_x: [-8.0, 8.0]
+          pos_y: [-8.0, 8.0]
+          pos_z: [0.5, 8.0]
+
+  - name: spawn_vel
+    description: "Widen initial linear/angular velocity spawn ranges (+/-8 m/s, +/-10 rad/s)."
+    overrides:
+      env:
+        spawn_ranges:
+          vel_x: [-8.0, 8.0]
+          vel_y: [-8.0, 8.0]
+          vel_z: [-8.0, 8.0]
+          ang_vel_x: [-10.0, 10.0]
+          ang_vel_y: [-10.0, 10.0]
+          ang_vel_z: [-10.0, 10.0]
+
+  # - name: cmd_delay_dr
+  #   description: "Enable command-delay domain randomization."
+  #   overrides:
+  #     env:
+  #       domain_randomization:
+  #         randomize_command_delay: true
+
+  - name: mass_dr
+    description: "Enable mass domain randomization."
+    overrides:
+      env:
+        domain_randomization:
+          randomize_mass: true
+
+  - name: tau_dr
+    description: "Enable motor time-constant (tau) domain randomization."
+    overrides:
+      env:
+        domain_randomization:
+          randomize_motor_tau: true
+
+  - name: disturbances
+    description: "Enable wind/drag/force disturbances."
+    overrides:
+      env:
+        disturbances:
+          enable: true
