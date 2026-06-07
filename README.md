@@ -28,6 +28,7 @@ filtering freely at run time.
 - [Evaluation & comparison](#evaluation--comparison)
 - [CBF safety filter](#cbf-safety-filter)
 - [Configuration reference](#configuration-reference)
+- [What we changed in Flightmare (and why)](#what-we-changed-in-flightmare-and-why)
 - [Extending the framework](#extending-the-framework)
 - [Real-drone deployment (ROS)](#real-drone-deployment-ros)
 - [Citation](#citation)
@@ -206,6 +207,36 @@ wrap a VecEnv with `scripts/cbf_wrapper.py`.
 `env.*` keys in a training config merge into the flightlib `quadrotor_env.yaml` (`quadrotor_env`,
 `quadrotor_dynamics`, `rl`, `disturbances`, plus `spawn_ranges`, `domain_randomization`, `vec_env`) —
 see `scripts/config_loader.py`.
+
+## What we changed in Flightmare (and why)
+
+[Flightmare](https://github.com/uzh-rpg/flightmare) is an excellent quadrotor simulator — fast,
+photorealistic, and built on solid rigid-body dynamics. But the upstream release predates the modern
+RL tooling we wanted to use: it ships an old Gym-style interface that does **not** plug into the
+current **Stable-Baselines3 / Gymnasium** stack, and it exposes **no hooks for domain randomization or
+disturbances**, which are exactly what you need for **sim-to-real transfer** and **generalization**.
+Rather than fork to a different simulator, we extended the vendored Flightmare in `flightmare/` so it
+keeps everything that made it great while supporting our training pipeline. The main changes:
+
+- **Up-to-date SB3 / Gymnasium interface.** A thin Gymnasium `VecEnv` adapter
+  (`scripts/env_wrapper.py: FlightlibVecEnv`) wraps the C++ `QuadrotorEnv_v1` with modern SB3 semantics:
+  `gymnasium.spaces`, `step_async`/`step_wait`, automatic action clipping to `[-1, 1]`,
+  `terminal_observation` on episode end, and `episode {"r", "l"}` statistics. This lets us train with
+  the current SB3 PPO out of the box instead of being pinned to a legacy Gym version.
+- **Domain randomization hooks (new C++ API).** The env now exposes per-env setters
+  (`setEnvMasses`, `setEnvMotorTauInvs`, `setEnvGoalPositions`, `reinitHoverMotor`) so we can randomize
+  **mass, motor time constant, and goal position** at every episode boundary
+  (`DomainRandomizationWrapper`). Upstream Flightmare has fixed dynamics per run; this is what makes the
+  policy robust to model mismatch and transferable to real hardware.
+- **Calibrated disturbance models in the dynamics.** The C++ environment gained an optional disturbance
+  block (`flightmare/flightlib/configs/quadrotor_env.yaml → disturbances`): Ornstein–Uhlenbeck wind
+  gusts, world-frame mean wind, body-frame quadratic drag, and additive force/torque noise, plus a
+  reseedable RNG (`seedDisturbance`) for reproducible evaluation. These close part of the sim-to-real
+  gap that the stock simulator cannot model.
+- **Full-envelope state injection.** `setQuadState` lets us place the drone at any pose/velocity/rate
+  (including inverted, high-speed, high-rate starts) for recovery training and matched-seed evaluation.
+- **Decimated physics.** High-rate integration with a lower-rate control/observation step
+  (`VecPhysicsDecimationWrapper`) decouples simulation fidelity from the policy rate.
 
 ## Extending the framework
 
