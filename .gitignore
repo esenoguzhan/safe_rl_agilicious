@@ -29,6 +29,8 @@ cmake-build-*/
 *.a
 *.out
 
+flightmare/flightlib/externals/
+
 # Training / ML artifacts
 logs/
 models/
@@ -49,3 +51,8 @@ Thumbs.db
 
 # Optional: uncomment if you don't want papers in the repo
 *.pdf
+
+
+comparison_plots/
+c_generated_code*/
+c_generated_code_*/

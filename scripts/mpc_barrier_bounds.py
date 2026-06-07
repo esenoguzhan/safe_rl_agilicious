@@ -12,7 +12,7 @@ import numpy as np
 
 
 def _barriers_to_axis_bounds(barriers: Sequence[Dict[str, Any]]) -> Dict[str, Tuple[Optional[float], Optional[float]]]:
-    """Same geometry as ``compare_scenarios._barriers_to_axis_bounds`` (single-axis n only)."""
+    """Same geometry as ``compare_core._barriers_to_axis_bounds`` (single-axis n only)."""
     bounds: Dict[str, List[Optional[float]]] = {}
     axis_names = {0: "x", 1: "y", 2: "z"}
     for b in barriers:

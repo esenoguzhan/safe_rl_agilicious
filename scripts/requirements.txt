@@ -1,4 +1,4 @@
-# PPO drone control scripts (train.py, val.py)
+# Safe RL quadrotor recovery (train.py, run_curriculum.py, compare.py)
 # Also need: flightlib (flightgym) from flightmare/flightlib with FLIGHTMARE_PATH set
 gymnasium>=0.29.0
 numpy>=1.20.0
@@ -7,5 +7,23 @@ stable-baselines3>=2.0.0
 matplotlib>=3.5.0
 openpyxl>=3.1.0
 
+# Training logs (SB3 is started with tensorboard_log=run_dir)
+tensorboard>=2.12.0
+
+# Progress bar (SB3 model.learn(progress_bar=True))
+tqdm>=4.60.0
+rich>=12.0.0
+
 # CBF filter (scripts/cbf_filter.py): OSQP for QP solver
 osqp>=0.6.0
+
+# Evaluation/comparison (compare.py) and CBF/MPC symbolic dynamics.
+# casadi is imported unconditionally by scripts/mpc_controller.py, so it is
+# required for ANY compare.py run (even RL-only).
+casadi>=3.6.0
+
+# Optional: NMPC baselines and the acados CBF solver (configs/cbf_config.yaml
+# solver: acados) additionally require the acados Python template AND the
+# compiled acados C library. Install separately per https://docs.acados.org
+# (pip install acados_template will not work without the built library).
+# acados_template
