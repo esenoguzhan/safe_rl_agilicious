@@ -12,8 +12,8 @@ script.
 
 Minimal invocation (everything else uses sensible defaults; ``vecnormalize.pkl``
 is auto-discovered next to ``best_model.zip``; a CSV trace is written to
-``/tmp/rl_cbf_feedthrough_trace_<timestamp>.csv`` by default for offline
-plotting):
+``scripts/recordings/rl_cbf_feedthrough_trace_<timestamp>.csv`` by default for
+offline plotting):
 
   python3 rl_cbf_feedthrough_rosbridge_client.py \\
     --model-path /path/to/run_dir_or_best_model.zip \\
@@ -81,17 +81,17 @@ def _parse_args():
     p.add_argument("--port", type=int, default=9090, help="rosbridge WebSocket port")
     p.add_argument(
         "--state-topic",
-        default="/angrybird/agiros_pilot/state",
+        default="/angrybird2_/agiros_pilot/state",
         help="agiros_msgs/QuadState subscription (full ROS name)",
     )
     p.add_argument(
         "--cmd-topic",
-        default="/angrybird/agiros_pilot/feedthrough_command",
+        default="/angrybird2_/agiros_pilot/feedthrough_command",
         help="agiros_msgs/Command publication (full ROS name)",
     )
     p.add_argument(
         "--telemetry-topic",
-        default="/angrybird/agiros_pilot/telemetry",
+        default="/angrybird2_/agiros_pilot/telemetry",
         help="agiros_msgs/Telemetry subscription (optional reference)",
     )
     p.add_argument(
@@ -214,8 +214,8 @@ def _parse_args():
         "--cbf-csv",
         default="",
         help="Path to append per-step state + CBF telemetry CSV. Empty "
-             "(default) -> /tmp/rl_cbf_feedthrough_trace_<timestamp>.csv. "
-             "Use --no-cbf-csv to disable recording entirely.",
+             "(default) -> scripts/recordings/rl_cbf_feedthrough_trace_"
+             "<timestamp>.csv. Use --no-cbf-csv to disable recording entirely.",
     )
     p.add_argument(
         "--no-cbf-csv",
@@ -489,11 +489,15 @@ def main():
     log_every = int(max(0, args.log_step_every))
     cbf_log_every = int(max(0, args.cbf_log_every))
     step_idx = 0
+    pre_engage_idx = 0
     warmup_left = int(max(0, args.engage_after_steps))
     freefall_left = int(max(0, args.freefall_steps))
     freefall_total = freefall_left
     freefall_announced = False
     zero_action = np.zeros(4, dtype=np.float32)
+    # Reused, never-mutated placeholder command for phases where we publish
+    # nothing (so no thrust is overwritten but the state is still recorded).
+    no_publish_cmd = {"thrusts": [0.0, 0.0, 0.0, 0.0]}
     zero_cbf_extras = _cbf_extra_values(
         {
             "u_rl_n": np.zeros(4),
@@ -521,6 +525,25 @@ def main():
                 continue
             if warmup_left > 0:
                 warmup_left -= 1
+                # Record the baseline trajectory *before* the RL+CBF pipeline
+                # takes over the command topic. We do NOT publish here, so
+                # whatever controller currently owns the drone stays in charge;
+                # we only observe (CBF telemetry columns are left at zero).
+                if csv_tracer is not None:
+                    try:
+                        t_sec = float(st.get("t", time.time()))
+                        current_goal = goal.get()
+                        obs = rl_core.build_observation_from_state_dict(
+                            st, fixed_goal_xyz=current_goal
+                        )
+                        csv_tracer.write(
+                            pre_engage_idx, t_sec, current_goal, st, obs,
+                            zero_action, no_publish_cmd,
+                            extra_values=zero_cbf_extras, phase="pre_engage",
+                        )
+                        pre_engage_idx += 1
+                    except Exception as e:
+                        logging.warning("pre-engage tracer.write failed: %s", e)
                 continue
 
             if freefall_left > 0:
@@ -559,6 +582,7 @@ def main():
                             csv_tracer.write(
                                 step_idx, t_sec, current_goal, st, obs,
                                 zero_action, cmd, extra_values=zero_cbf_extras,
+                                phase="freefall",
                             )
                         except Exception as e:
                             logging.warning("tracer.write failed: %s", e)

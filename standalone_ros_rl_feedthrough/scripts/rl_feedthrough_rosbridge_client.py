@@ -56,17 +56,17 @@ def _parse_args():
     p.add_argument("--port", type=int, default=9090, help="rosbridge WebSocket port")
     p.add_argument(
         "--state-topic",
-        default="/angrybird/agiros_pilot/state",
+        default="/angrybird2_/agiros_pilot/state",
         help="agiros_msgs/QuadState subscription (full ROS name)",
     )
     p.add_argument(
         "--cmd-topic",
-        default="/angrybird/agiros_pilot/feedthrough_command",
+        default="/angrybird2_/agiros_pilot/feedthrough_command",
         help="agiros_msgs/Command publication (full ROS name)",
     )
     p.add_argument(
         "--telemetry-topic",
-        default="/angrybird/agiros_pilot/telemetry",
+        default="/angrybird2_/agiros_pilot/telemetry",
         help="agiros_msgs/Telemetry subscription (optional reference)",
     )
     p.add_argument(
@@ -253,8 +253,8 @@ def _parse_args():
         "--data-csv",
         default="",
         help="Path to append per-step state/action/thrust CSV trace. Empty "
-             "(default) -> /tmp/rl_feedthrough_trace_<timestamp>.csv. "
-             "Use --no-data-csv to disable recording entirely.",
+             "(default) -> scripts/recordings/rl_feedthrough_trace_"
+             "<timestamp>.csv. Use --no-data-csv to disable recording entirely.",
     )
     p.add_argument(
         "--no-data-csv",
@@ -405,11 +405,15 @@ def main():
 
     log_every = int(max(0, args.log_step_every))
     step_idx = 0
+    pre_engage_idx = 0
     warmup_left = int(max(0, args.engage_after_steps))
     freefall_left = int(max(0, args.freefall_steps))
     freefall_total = freefall_left
     freefall_announced = False
     zero_action = [0.0, 0.0, 0.0, 0.0]
+    # Reused, never-mutated placeholder command for phases where we publish
+    # nothing (so no thrust is overwritten but the state is still recorded).
+    no_publish_cmd = {"thrusts": [0.0, 0.0, 0.0, 0.0]}
     try:
         while ros.is_connected:
             time.sleep(period)
@@ -419,6 +423,23 @@ def main():
                 continue
             if warmup_left > 0:
                 warmup_left -= 1
+                # Record the baseline trajectory *before* we take over the
+                # command topic. We do NOT publish here, so whatever controller
+                # currently owns the drone stays in charge; we only observe.
+                if tracer is not None:
+                    try:
+                        t_sec = float(st.get("t", time.time()))
+                        current_goal = goal.get()
+                        obs = core.build_observation_from_state_dict(
+                            st, fixed_goal_xyz=current_goal
+                        )
+                        tracer.write(
+                            pre_engage_idx, t_sec, current_goal, st, obs,
+                            zero_action, no_publish_cmd, phase="pre_engage",
+                        )
+                        pre_engage_idx += 1
+                    except Exception as e:
+                        logging.warning("pre-engage tracer.write failed: %s", e)
                 continue
 
             if freefall_left > 0:
@@ -456,7 +477,7 @@ def main():
                         try:
                             tracer.write(
                                 step_idx, t_sec, current_goal, st, obs,
-                                zero_action, cmd,
+                                zero_action, cmd, phase="freefall",
                             )
                         except Exception as e:
                             logging.warning("tracer.write failed: %s", e)

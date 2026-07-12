@@ -7,6 +7,7 @@ No ROS imports — pass numpy arrays or dicts matching rosbridge JSON shape.
 import csv
 import logging
 import os
+import queue
 import sys
 import threading
 import time
@@ -567,11 +568,22 @@ def resolve_policy_paths(model_arg, vnorm_arg, default_model="", default_vnorm="
     return model_path, vnorm_path
 
 
+_CORE_DIR = os.path.dirname(os.path.abspath(__file__))
+RECORDINGS_DIRNAME = "recordings"
+
+
+def default_recordings_dir():
+    # type: () -> str
+    """``scripts/recordings`` — a dedicated folder next to this module for CSV
+    traces, so runs no longer scatter files under ``/tmp``."""
+    return os.path.join(_CORE_DIR, RECORDINGS_DIRNAME)
+
+
 def default_trace_csv_path(tag="rl_feedthrough"):
     # type: (str) -> str
-    """Auto-generated ``/tmp/<tag>_trace_<YYYYMMDD_HHMMSS>.csv`` path."""
+    """Auto-generated ``scripts/recordings/<tag>_trace_<YYYYMMDD_HHMMSS>.csv``."""
     ts = time.strftime("%Y%m%d_%H%M%S")
-    return os.path.join("/tmp", "{}_trace_{}.csv".format(tag, ts))
+    return os.path.join(default_recordings_dir(), "{}_trace_{}.csv".format(tag, ts))
 
 
 class GoalState(object):
@@ -676,17 +688,28 @@ def start_stdin_goal_reader(goal_state, get_state_fn, enabled=True):
 
 
 class StateCsvTracer(object):
-    """Append-only per-step state/action/thrust CSV trace.
+    """Append-only per-step state/action/thrust CSV trace (async writer).
 
     Records goal, full state, position error, raw policy action and published
     thrusts on every control step. Designed for offline plotting after a run
     (trajectories, attitude, action profiles, thrust distribution). The CBF
     entrypoint passes extra columns/values through ``extra_columns`` /
     ``extra_values`` for CBF-specific telemetry.
+
+    All disk I/O (row formatting, ``writerow``, ``flush``) runs on a dedicated
+    background thread. :meth:`write` only snapshots a few references and drops
+    them on an unbounded queue, so the caller's control loop is never blocked
+    on the filesystem — this keeps the command-publishing cadence tight so the
+    autopilot doesn't fall back to another controller while we save data.
+
+    The ``phase`` column tags each row with the pipeline stage it was captured
+    in (``pre_engage`` before we take over, ``freefall``, ``engaged``), so the
+    baseline trajectory recorded *before* we start overwriting ROS commands can
+    be separated from the policy-controlled trajectory when plotting.
     """
 
     BASE_COLUMNS = (
-        "wall_time", "step_idx", "t_sec",
+        "wall_time", "step_idx", "t_sec", "phase",
         "gx", "gy", "gz",
         "px", "py", "pz",
         "vx", "vy", "vz",
@@ -697,6 +720,8 @@ class StateCsvTracer(object):
         "thr0", "thr1", "thr2", "thr3", "thr_sum",
     )
 
+    _SENTINEL = object()
+
     def __init__(self, path, extra_columns=(), flush_every=50):
         # type: (str, Any, int) -> None
         self.path = path
@@ -705,10 +730,51 @@ class StateCsvTracer(object):
         self._fh = None  # type: Any
         self._writer = None  # type: Any
         self._row_count = 0
+        self._dropped = 0
+        # Unbounded queue: ``put_nowait`` never blocks the control loop.
+        self._queue = queue.Queue()  # type: queue.Queue
+        self._thread = threading.Thread(
+            target=self._run, name="StateCsvTracer", daemon=True
+        )
+        self._thread.start()
 
     @property
     def row_count(self):
         return self._row_count
+
+    @property
+    def dropped(self):
+        return self._dropped
+
+    def write(self, step_idx, t_sec, goal, state_dict, obs, action, cmd,
+              extra_values=(), phase="engaged"):
+        """Queue a row for the writer thread (non-blocking).
+
+        ``state_dict`` is the rosbridge-style QuadState dict. The referenced
+        objects (``state_dict``, ``obs``, ``action``, ``cmd``) must not be
+        mutated in place after this call, since formatting is deferred to the
+        writer thread; the callers here always hand over freshly built objects.
+        """
+        item = (
+            time.time(), step_idx, t_sec, phase, goal,
+            state_dict, obs, action, cmd, tuple(extra_values),
+        )
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:  # pragma: no cover - queue is unbounded
+            self._dropped += 1
+
+    def _run(self):
+        while True:
+            item = self._queue.get()
+            if item is self._SENTINEL:
+                break
+            try:
+                self._write_row(item)
+            except Exception as e:  # keep the writer thread alive on bad rows
+                logger.warning("StateCsvTracer: dropping row: %s", e)
+                self._dropped += 1
+        self._close_file()
 
     def _ensure_open(self):
         if self._fh is not None:
@@ -724,9 +790,9 @@ class StateCsvTracer(object):
             self._writer.writerow(list(self.BASE_COLUMNS) + list(self.extra_columns))
             self._fh.flush()
 
-    def write(self, step_idx, t_sec, goal, state_dict, obs, action, cmd,
-              extra_values=()):
-        """Append a row. ``state_dict`` is the rosbridge-style QuadState dict."""
+    def _write_row(self, item):
+        (wall_time, step_idx, t_sec, phase, goal,
+         state_dict, obs, action, cmd, extra_values) = item
         self._ensure_open()
         p = state_dict["pose"]["position"]
         v = state_dict["velocity"]["linear"]
@@ -736,7 +802,7 @@ class StateCsvTracer(object):
         thrusts = cmd.get("thrusts", [0.0, 0.0, 0.0, 0.0])
         g = goal if goal is not None else (float("nan"),) * 3
         row = [
-            "%.6f" % time.time(), int(step_idx), "%.6f" % float(t_sec),
+            "%.6f" % wall_time, int(step_idx), "%.6f" % float(t_sec), phase,
             "%.6f" % float(g[0]), "%.6f" % float(g[1]), "%.6f" % float(g[2]),
             "%.6f" % float(p["x"]), "%.6f" % float(p["y"]), "%.6f" % float(p["z"]),
             "%.6f" % float(v["x"]), "%.6f" % float(v["y"]), "%.6f" % float(v["z"]),
@@ -757,7 +823,7 @@ class StateCsvTracer(object):
         if self._row_count % self._flush_every == 0:
             self._fh.flush()
 
-    def close(self):
+    def _close_file(self):
         if self._fh is not None:
             try:
                 self._fh.flush()
@@ -766,3 +832,11 @@ class StateCsvTracer(object):
                 pass
             self._fh = None
             self._writer = None
+
+    def close(self):
+        """Flush the queue and stop the writer thread (blocks until drained)."""
+        if self._thread is None:
+            return
+        self._queue.put(self._SENTINEL)
+        self._thread.join()
+        self._thread = None
