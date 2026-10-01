@@ -17,6 +17,33 @@ filtering freely at run time.
 
 ---
 
+## Our work at a glance
+
+We train a PPO policy that flies a quadrotor back to a goal from **arbitrary initial states**, including
+large velocities, high body rates, and fully inverted attitudes. At deployment, we add a **Control Barrier
+Function (CBF) safety filter** that keeps the drone inside a safe region. We compare this against
+nonlinear MPC baselines under model mismatch (mass and motor time constant) and external disturbances.
+
+- **Recovery from the full flight envelope.** A dual-scale reward and curriculum training let the policy
+  recover from up to ±8 m/s, ±10 rad/s, and upside-down starts, where the NMPC baseline fails.
+- **Robust to model mismatch.** Domain randomization keeps the policy reliable when the real mass or
+  motor dynamics differ from the nominal model.
+- **Safety at deployment only.** The CBF makes a minimal correction to the RL action at each step,
+  with no change to training, and runs in under 1 ms per step.
+
+<p align="center">
+  <img src="docs/figures/inverted_recovery.png" width="900" alt="Recovery from a fully inverted start with RL and RL+CBF">
+</p>
+<p align="center"><sub>Recovery from a fully inverted start: (a) RL policy, (b) RL policy with the CBF filter.</sub></p>
+
+<p align="center">
+  <img src="docs/figures/cbf_safety.png" width="900" alt="CBF enforcing ceiling and ground boundaries">
+</p>
+<p align="center"><sub>Vertical safety constraints with the goal placed outside the safe region. Plain RL and NMPC cross
+the boundary, and RL + CBF stays inside it. The lower panels show the barrier value h(x), with violations shaded.</sub></p>
+
+---
+
 ## Contents
 
 - [How it works](#how-it-works)
